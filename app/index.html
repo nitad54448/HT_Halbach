@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halbach Hall · Workstation</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><strong>Halbach Hall workstation</strong> <small>· Hall effect, rotating Halbach field</small></div>
+  <div class="actions"><span class="badge sim" id="b-mode">Simulated backend</span><span class="badge" id="b-ls">Temp: not connected</span><span class="badge" id="b-run">Idle</span></div>
+</header>
+<nav class="tabs" id="tabs" role="tablist"></nav>
+<main>
+
+<section class="page" id="p-hardware" data-title="Hardware">
+  <h1>Hardware</h1>
+  <p class="intro">Declare which instruments are available, by type. The next page offers only the measurement modes these instruments can support. This build runs against a <b>simulated</b> backend (clearly flagged); real GPIB/VISA access arrives with the Tauri backend and uses the same driver code.</p>
+  <div class="subtabs" role="tablist" id="hw-subtabs">
+    <button data-sub="temp" class="active">Temperature control</button><button data-sub="magnet">Magnet</button><button data-sub="source">Current source</button><button data-sub="measure">Measure</button>
+  </div>
+  <div class="card subpane active" data-pane="temp"><h2>Temperature controller (GPIB)</h2><div class="grid g3">
+      <div class="field"><label for="f-model">Model</label><select id="f-model" data-bind="hardware.tempController.model"><option value="LS335">Lake Shore 335</option><option value="LS332">Lake Shore 332</option></select></div>
+      <div class="field"><label for="f-addr">VISA address</label><input id="f-addr" data-bind="hardware.tempController.address"><small>e.g. GPIB0::12::INSTR</small></div>
+      <div class="field"><label for="f-input">Sample sensor input</label><select id="f-input" data-bind="hardware.tempController.input"><option>A</option><option>B</option></select></div>
+      <div class="field"><label for="f-loop">Control loop / heater output</label><select id="f-loop" data-bind="hardware.tempController.loop" data-num><option value="1">1</option><option value="2">2</option></select></div>
+      <div class="field"><label for="f-maxk">Software max setpoint (K)</label><input id="f-maxk" type="number" data-bind="hardware.tempController.maxK" data-num><small>Protects the sample/cryostat. Programs above this are rejected.</small></div>
+      <div class="field"><label for="f-maxr">Software max ramp (K/min)</label><input id="f-maxr" type="number" data-bind="hardware.tempController.maxRateKmin" data-num></div>
+    </div>
+    <div class="actions" style="margin-top:14px"><button class="primary" id="ls-connect">Connect</button><button class="secondary" id="ls-disconnect" disabled>Disconnect</button><button class="danger" id="ls-heateroff" disabled>Heater off</button></div>
+    <div id="ls-info" class="muted" style="margin-top:10px"></div></div>
+  <div class="card subpane" data-pane="magnet"><h2>Rotating Halbach magnet</h2><div class="grid g3">
+      <div class="field"><label>Rotation controller</label><select data-bind="hardware.magnet.rotator" data-opts="ROTATOR"></select></div>
+      <div class="field"><label>Port / address</label><input data-bind="hardware.magnet.rotator_addr" placeholder="e.g. COM3"></div>
+      <div></div>
+      <div class="field"><label>Position detector</label><select data-bind="hardware.magnet.encoder" data-opts="ENCODER"></select></div>
+      <div class="field"><label>Module / channel</label><input data-bind="hardware.magnet.encoder_addr" placeholder="e.g. cDAQ1Mod2/ctr0"></div>
+      <div></div>
+      <div class="field"><label>Field-angle zero offset (deg)</label><input type="number" step="any" data-bind="hardware.magnet.angle_offset_deg" data-num><small>Encoder zero to +X field direction, from calibration.</small></div>
+      <div class="field"><label>Encoder direction</label><select data-bind="hardware.magnet.dir_sign" data-num><option value="1">+1 (encoder angle = field angle)</option><option value="-1">−1 (reversed)</option></select></div>
+      <div class="field"><label>Calibrated field magnitude B (T)</label><input type="number" min="0" step="any" data-bind="sample.B_T" data-num><small>At the sample position.</small></div>
+    </div></div>
+  <div class="card subpane" data-pane="source"><h2>Current source</h2><div class="grid g3">
+      <div class="field"><label>Instrument</label><select data-bind="hardware.source.model" data-opts="SOURCES"></select></div>
+      <div class="field"><label>Address</label><input data-bind="hardware.source.address" placeholder="e.g. GPIB0::12::INSTR or IP"></div>
+      <div id="src-caps" class="muted" style="align-self:end"></div>
+      <div class="field"><label>Voltage compliance (V)</label><input type="number" step="any" data-bind="hardware.source.compliance_V" data-num></div>
+      <div class="field"><label>Software current limit (mA, RMS for AC)</label><input type="number" step="any" data-bind="hardware.source.max_mA" data-num><small>Modes requesting more are rejected. Verify peak vs RMS units per model.</small></div>
+    </div></div>
+  <div class="card subpane" data-pane="measure"><h2>Voltage measurement</h2><div class="grid g3">
+      <div class="field"><label>Nanovoltmeter (DC)</label><select data-bind="hardware.measure.volt" data-opts="VOLT"></select></div>
+      <div class="field"><label>Address</label><input data-bind="hardware.measure.volt_addr"></div><div></div>
+      <div class="field"><label>Lock-in 1</label><select data-bind="hardware.measure.lockin1" data-opts="LOCKIN"></select></div>
+      <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin1_addr"><small>Two SR830s must have distinct GPIB addresses.</small></div><div></div>
+      <div class="field"><label>Lock-in 2 (optional)</label><select data-bind="hardware.measure.lockin2" data-opts="LOCKIN"></select></div>
+      <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin2_addr"></div><div></div>
+      <div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div>
+    </div><div id="measure-msg" style="margin-top:10px"></div></div>
+  <div class="card"><h2>Declared instruments</h2><div id="hw-summary"></div></div>
+</section>
+
+<section class="page" id="p-mode" data-title="Mode">
+  <h1>Measurement mode</h1>
+  <p class="intro">Only modes supported by the instruments declared on the Hardware page can be selected. Unavailable modes say what is missing.</p>
+  <div class="grid g3" id="mode-cards"></div>
+  <div id="mode-msg" style="margin-top:16px"></div>
+  <div class="card mode-panel" id="mp-chirp" hidden><h2>CHIRP parameters</h2><div class="grid g3">
+      <div class="field"><label>Carrier frequency (Hz)</label><input type="number" data-bind="method.carrier_hz" data-num><small>Guide range 500-900 Hz.</small></div>
+      <div class="field"><label>Current levels, RMS (mA, comma-separated)</label><input id="f-levels"></div>
+      <div class="field"><label>Rotation frequency (Hz)</label><input type="number" step="any" data-bind="method.rot_hz" data-num><small>Guide range 0.1-0.3 Hz.</small></div>
+      <div class="field"><label>Direction</label><select data-bind="method.direction"><option value="both">Both</option><option value="cw">Clockwise</option><option value="ccw">Counter-clockwise</option></select></div>
+      <div class="field"><label>Dwell per level (s)</label><input type="number" data-bind="method.dwell_s" data-num></div>
+      <div class="field"><label>Post-step mask (s)</label><input type="number" step="any" data-bind="method.mask_s" data-num></div>
+  </div></div>
+  <div class="card mode-panel" id="mp-fixed" hidden><h2>Fixed field parameters</h2><div class="grid g3">
+      <div class="field"><label>Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
+      <div class="field"><label>Angular acquisition</label><select data-bind="method.fixed.acq"><option value="step">Step and settle</option><option value="scan">Continuous scan</option></select></div>
+      <div class="field"><label>Current (mA)</label><input type="number" step="any" data-bind="method.fixed.I_mA" data-num><small>Peak or RMS: record in the sample notes.</small></div>
+      <div class="field" data-when="ac"><label>AC carrier frequency (Hz)</label><input type="number" data-bind="method.fixed.carrier_hz" data-num></div>
+      <div class="field" data-when="step"><label>Number of angles</label><input type="number" data-bind="method.fixed.n_angles" data-num></div>
+      <div class="field" data-when="step"><label>Settling time (s)</label><input type="number" step="any" data-bind="method.fixed.settle_s" data-num></div>
+      <div class="field" data-when="scan"><label>Rotation frequency (Hz)</label><input type="number" step="any" data-bind="method.fixed.rot_hz" data-num></div>
+      <div class="field" data-when="dc"><label>Reverse DC current at each angle</label><select data-bind="method.fixed.reverse" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
+  </div></div>
+  <div class="card mode-panel" id="mp-rotating" hidden><h2>Rotating field parameters</h2><div class="grid g3">
+      <div class="field"><label>Excitation / detection</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select></div>
+      <div class="field"><label>Current (mA)</label><input type="number" step="any" data-bind="method.rotating.I_mA" data-num></div>
+      <div class="field"><label>Rotation frequency (Hz)</label><input type="number" step="any" data-bind="method.rotating.rot_hz" data-num></div>
+      <div class="field" data-when="ac"><label>AC carrier frequency (Hz)</label><input type="number" data-bind="method.rotating.carrier_hz" data-num></div>
+      <div class="field" data-when="ac"><label>Sideband</label><select data-bind="method.rotating.sideband"><option value="lower">Lower (carrier − rotation)</option><option value="upper">Upper (carrier + rotation)</option></select></div>
+      <div class="field"><label>Acquisition duration (s)</label><input type="number" data-bind="method.rotating.duration_s" data-num></div>
+      <div class="field"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
+  </div></div>
+</section>
+
+<section class="page" id="p-sample" data-title="Sample">
+  <h1>Sample</h1>
+  <p class="intro">Start at zero tilt for the ordinary Hall coefficient. Field magnitude is set on the Hardware page (Magnet).</p>
+  <div class="card" style="max-width:900px"><h2>Sample</h2><div class="grid g2">
+      <div class="field"><label>Sample ID</label><input data-bind="sample.id"></div>
+      <div class="field"><label>Conducting thickness (nm)</label><input type="number" min="0" step="any" data-bind="sample.thickness_nm" data-num></div>
+      <div class="field"><label>Tilt ψ (deg)</label><input type="number" step="any" data-bind="sample.tilt_deg" data-num></div>
+      <div class="field"><label>Sheet resistance R□ (Ω) <span class="muted">(fallback)</span></label><input type="number" step="any" data-bind="sample.rsq_ohm" data-num data-nullable><small>Used for mobility if a run has no R□ of its own.</small></div>
+      <div class="field"><label>Width / length (µm)</label><div class="grid g2"><input type="number" data-bind="sample.width_um" data-num><input type="number" data-bind="sample.length_um" data-num></div></div>
+    </div><div class="field" style="margin-top:14px"><label>Notes</label><textarea rows="3" data-bind="sample.notes"></textarea></div>
+    <div id="sample-msg" style="margin-top:12px"></div></div>
+</section>
+
+<section class="page" id="p-temp" data-title="Temperature program">
+  <h1>Temperature program</h1>
+  <p class="intro">Step programming for the Lake Shore controller. <b>Go to</b> sets heater range, ramp rate and setpoint, then waits until the temperature stays within tolerance for the stability window. <b>Measure</b> runs the CHIRP acquisition at that temperature. On any error or abort the heater is switched off.</p>
+  <div class="card"><div class="toolbar">
+    <div class="field"><label>Add step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add</button>
+    <span style="width:24px"></span>
+    <div class="field"><label>Sweep from (K)</label><input id="sw0" type="number" value="300"></div><div class="field"><label>to (K)</label><input id="sw1" type="number" value="320"></div><div class="field"><label>step (K)</label><input id="swd" type="number" value="10"></div>
+    <div class="field"><label>rate (K/min)</label><input id="swr" type="number" value="5"></div><button class="secondary" id="add-sweep">Append sweep (go+measure)</button>
+    <button class="secondary" id="clear-prog">Clear</button>
+  </div>
+  <div class="tablewrap"><table id="prog-table"></table></div>
+  <div id="prog-msg" style="margin-top:12px"></div></div>
+</section>
+
+<section class="page" id="p-run" data-title="Run">
+  <h1>Run</h1>
+  <div id="run-notice"></div>
+  <div class="card"><div class="actions">
+    <button class="primary" id="r-start">Start program</button><button class="secondary" id="r-pause" disabled>Pause</button><button class="danger" id="r-abort" disabled>Abort</button>
+    <div class="field" style="margin-left:18px"><label>Simulation speed</label><select id="r-speed"><option value="1">1× (real time)</option><option value="20">20×</option><option value="200">200×</option><option value="0" selected>Max</option></select></div>
+  </div>
+  <div class="progress" style="margin:16px 0 6px"><div id="r-prog"></div></div><div id="r-status" class="muted">Idle</div></div>
+  <div class="kpis" id="r-kpis"></div>
+  <div class="grid g2" style="margin-top:16px"><div class="card"><h2>Temperature</h2><canvas id="c-temp"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>measured</span><span><i style="background:#e3b96e"></i>setpoint</span></div></div>
+  <div class="card"><h2>Program steps</h2><div class="tablewrap"><table id="run-steps"></table></div></div></div>
+</section>
+
+<section class="page" id="p-inspect" data-title="Data inspect">
+  <h1>Data inspect</h1>
+  <p class="intro">Look at raw lock-in data during or after a measurement. Excluding samples re-runs the fit; the exclusions are recorded in History.</p>
+  <div class="toolbar"><div class="field"><label>Run</label><select id="i-run"></select></div>
+    <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="i-live" style="width:auto;min-height:0"> follow latest run</label>
+    <button class="secondary" id="i-refit">Refit</button></div>
+  <div class="kpis" id="i-kpis"></div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><h2>X vs field angle</h2><canvas id="c-xth"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>valid</span><span><i style="background:#566677"></i>masked</span><span><i style="background:#e3b96e"></i>fit</span></div></div>
+    <div class="card"><h2>X, Y vs time</h2><canvas id="c-xt"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>X</span><span><i style="background:#80aaf9"></i>Y</span></div></div>
+    <div class="card"><h2>Residuals vs angle</h2><canvas id="c-res"></canvas></div>
+    <div class="card"><h2>Raw samples</h2><div class="toolbar"><div class="field"><label>Mask from t (s)</label><input id="i-m0" type="number" step="any"></div><div class="field"><label>to t (s)</label><input id="i-m1" type="number" step="any"></div><button class="secondary" id="i-mask">Exclude range</button><button class="secondary" id="i-unmask">Restore range</button></div><div class="tablewrap" style="max-height:240px"><table id="i-table"></table></div></div>
+  </div>
+</section>
+
+<section class="page" id="p-analysis" data-title="Analysis">
+  <h1>Analysis</h1>
+  <p class="intro">Derived transport quantities per run (CHIRP guide §10). Values assume the ideal geometry and baseline material model are validated; see the report assumptions.</p>
+  <div class="grid g2"><div class="card"><h2>Hall sheet density n<sub>s</sub> (cm⁻²) vs T</h2><canvas id="c-ns"></canvas></div><div class="card"><h2>Hall mobility µ (cm²/Vs) vs T</h2><canvas id="c-mu"></canvas></div>
+  <div class="card"><h2>R<sub>H</sub> (cm³/C) vs T</h2><canvas id="c-rh"></canvas></div><div class="card"><h2>Sheet resistance R□ (Ω) vs T</h2><canvas id="c-rs"></canvas></div></div>
+  <div class="card"><div class="toolbar"><button class="secondary" id="a-csv">Export summary CSV</button></div><div class="tablewrap"><table id="a-table"></table></div></div>
+</section>
+
+<section class="page" id="p-history" data-title="History">
+  <h1>History</h1>
+  <p class="intro">Audit trail of configuration changes, program runs and data edits. Saved with the project.</p>
+  <div class="card"><div class="toolbar"><button class="secondary" id="h-csv">Export CSV</button></div><div class="tablewrap" style="max-height:60vh"><table id="h-table"></table></div></div>
+</section>
+
+<section class="page" id="p-log" data-title="Log">
+  <h1>Log</h1>
+  <p class="intro"><b>None</b>: nothing recorded. <b>Normal</b>: connections, steps, warnings, errors. <b>Verbose</b>: adds step parameters and settings changes. <b>Debug</b>: adds every instrument command and reply, and data payloads. Warnings and errors are kept at all levels except None.</p>
+  <div class="card"><div class="toolbar">
+    <div class="field"><label for="l-level">Capture level</label><select id="l-level"><option value="none">None</option><option value="normal">Normal</option><option value="verbose">Verbose</option><option value="debug">Debug</option></select></div>
+    <div class="field"><label>Show</label><select id="l-view"><option value="debug">Everything captured</option><option value="verbose">≤ Verbose</option><option value="normal">≤ Normal</option><option value="warn">Warnings &amp; errors</option></select></div>
+    <div class="field"><label>Filter text</label><input id="l-filter" placeholder="e.g. LS.tx"></div>
+    <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="l-follow" checked style="width:auto;min-height:0"> follow</label>
+    <button class="secondary" id="l-save">Save log…</button><button class="secondary" id="l-clear">Clear</button><span class="muted" id="l-count"></span>
+  </div><div id="logview" role="log" aria-live="off"></div></div>
+</section>
+
+<section class="page" id="p-project" data-title="Project & report">
+  <h1>Project &amp; report</h1>
+  <div class="grid g2"><div class="card"><h2>Project file</h2><p class="muted">A project holds sample, method, program, all runs (raw samples), history and the log. Load it later for analysis.</p>
+    <div class="actions"><button class="primary" id="pr-save">Save project…</button><label class="secondary" style="display:inline-block;padding:8px 14px;border-radius:6px;border:1px solid #395063;cursor:pointer">Load project…<input type="file" id="pr-load" accept=".json,application/json" hidden></label><button class="secondary" id="pr-new">New project</button></div><div id="pr-msg" style="margin-top:12px"></div></div>
+    <div class="card"><h2>Export &amp; report</h2><div class="actions"><button class="secondary" id="pr-csv">Export raw data CSV (selected run)</button><button class="primary" id="pr-report">Print report…</button></div><p class="muted">The report includes sample, method, temperature program, results table, plots, assumptions and a summary of the log. Use “Save as PDF” in the print dialog.</p></div></div>
+</section>
+
+<div class="pager" id="pager" style="max-width:1500px;margin:0 auto;padding:0 32px 40px"><button class="secondary" id="back">← Back</button><button class="primary" id="next">Next →</button></div>
+</main>
+<div id="report"></div>
+<script src="js/core.js"></script><script src="js/lakeshore.js"></script><script src="js/analysis.js"></script><script src="js/modes.js"></script><script src="js/sim.js"></script><script src="js/plot.js"></script><script src="js/app.js"></script>
+</body>
+</html>
