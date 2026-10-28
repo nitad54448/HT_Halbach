@@ -1,0 +1,8 @@
+﻿[package]
+name = "halbach-instruments"
+version = "0.1.0"
+edition = "2021"
+description = "Instrument backend foundation for the Halbach Hall workstation"
+
+[lib]
+path = "src/lib.rs"
