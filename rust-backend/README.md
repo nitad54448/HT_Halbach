@@ -1,23 +1,51 @@
-﻿# Rust instrument backend foundation
+# Native Rust instrument service
 
-This crate is an early, independent foundation, not a working hardware backend or a Tauri application. It has no third-party dependencies. The existing `tauri_rust_backend_engine.rs` is an old simulation and must not be used to control hardware or treated as real measurement data.
+The static HTML/JavaScript UI runs in Live Server or GitHub Pages. All hardware communication and real acquisition run in this Rust process on the measurement PC. Browsers cannot load NI-VISA/DAQmx DLLs or control the PS10 COM port directly. There is no Python dependency and no required Tauri desktop shell.
 
-## Current functionality
+## Start
 
-- Typed inventory and roles for Keithley 6220, 6221 and 2182A; Lake Shore 155 AC; Ametek 7230; Zurich Instruments MFLI; SRS SR830; OWIS PS10; NI 9413; and an NI DAQmx temperature reader.
-- Discovery adapter interface with explicit errors and duplicate-identity rejection. No vendor discovery adapter is implemented yet. No device is simulated as discovered.
-- Role assignment validation and tentative method candidates. These do not verify reference generation, signal wiring, device options or timing.
-- A line-oriented TCP transport for explicitly configured endpoints that actually support that protocol. It is not an implementation of VISA, VXI-11, HiSLIP or LabOne.
-- SR830 X/Y snapshot parser using `SNAP? 1,2`, transport-independent. The SR830's GPIB transport and response-interface setup are not implemented.
-- Unit tests for parsing, roles and failure behavior. Run `cargo test` from this directory after installing Rust.
+From the repository root:
 
-## Work required before equipment use
+```powershell
+powershell -File rust-backend/start.ps1
+```
 
-1. Implement NI-VISA GPIB discovery and sessions, with explicit timeouts, device identification and disconnect handling; verify command sets and each device's interface configuration. Two SR830s must have distinct addresses.
-2. Implement Lake Shore 155 and Ametek Ethernet transport using their documented protocols, and MFLI through the supported Zurich LabOne API. Do not assume a raw TCP protocol applies to every Ethernet device.
-3. Implement OWIS serial discovery and motion using the actual PS10 firmware, axis configuration, stage calibration, travel limits and interlocks.
-4. Implement NI-DAQmx discovery and acquisition for the actual cDAQ chassis, position module, encoder wiring, channel mapping, calibration and temperature module. Confirm the model number: NI's published counter-support list includes NI 9411 but does not establish NI 9413 support.
-5. Implement device-specific configuration, current limits and output disable, stopping motion, synchronized acquisition, data storage, errors and recovery. Verify current units (peak vs RMS), limits and readbacks per model. Design and test safe failure behavior on the actual bench.
-6. Create the Tauri project, IPC commands and permissions; connect discovery results to the UI's `setDiscoveryResults`. Live parameter updates need validated, acknowledged backend commands and an acquisition record of changes. The old simulation's start/stop commands are not suitable.
+The launcher uses the compiled release executable when available, otherwise builds it with Cargo. This checkout also supports the workspace-local Rust toolchain under `.tools/`; a fresh checkout needs Rust installed with rustup. To rebuild after changing Rust sources, run `cargo build --release --manifest-path rust-backend/Cargo.toml` using your installed toolchain. The standalone executable is `rust-backend/target/release/halbach-service.exe`.
 
-The [SR830 manual](https://www.thinksrs.com/downloads/pdfs/manuals/SR830m.pdf) documents `SNAP?` and the response interface. The [Keithley 6220/6221 reference manual](https://download.tek.com/manual/622x-901-01%20%28C%20-%20Oct%202008%29%28Ref%29.pdf), [2182A manual](https://download.tek.com/manual/2182A-900-01C_July_2022_User.pdf), [Lake Shore 155 manual](https://www.lakeshore.com/docs/default-source/product-downloads/manuals/155manual.pdf) and [OWIS PS10 manual](https://www.owis.eu/fileadmin/user_upload/PDF-Files/Download_Area/manuals___co/Betriebsanleitungen/PS_10_User_Manual.pdf) are primary sources for future drivers. MFLI requires the [LabOne API](https://docs.zhinst.com/mfli_user_manual/getting_started/device_connectivity_labone.html). Check the [NI counter module support list](https://www.ni.com/en/support/documentation/supplemental/18/cdaq-module-support-for-accessing-on-board-counters.html) against the actual module and chassis.
+Open `app/index.html` using Live Server. On Devices, under Local Rust service, enter `http://127.0.0.1:8765` and the pairing token printed in the service terminal. The token is saved locally in `rust-backend/data/service.token`; the browser keeps it only for the current session and excludes it from exported presets/projects. Starting the service or opening the UI does not operate instruments.
+
+Live Server origins `http://localhost:5500`, `http://127.0.0.1:5500` and ports 5501 are allowed by default. For another port, pass its exact origin:
+
+```powershell
+powershell -File rust-backend/start.ps1 -AllowOrigin http://127.0.0.1:5502
+```
+
+For GitHub Pages:
+
+```powershell
+powershell -File rust-backend/start.ps1 -AllowOrigin https://YOUR-ACCOUNT.github.io
+```
+
+Use the origin only, without repository path or trailing slash. Serve the contents of `app/` as the site, or visit `/app/` if publishing the repository root. The Rust service must still run on the PC connected to the instruments. Allow the browser's Local Network Access/loopback permission when prompted; browser policies may restrict access from hosted pages. The UI explicitly requests loopback access. The service listens only on IPv4 loopback and requires both an allowed Origin and a pairing token for hardware requests. Do not publish the token. Optional `-ServeUi` also serves the UI at `http://127.0.0.1:8765`.
+
+## Hardware
+
+Use Windows with NI-VISA matching the executable architecture (this build is 64 bit). The Rust service loads `visa64.dll` dynamically; NI 9361 optical position additionally needs NI-DAQmx (`nicaiu.dll`). Configure the Ethernet cDAQ-9183, NI 9361 counter and encoder wiring in NI MAX first. There are no Python driver wrappers.
+
+Supported acquisition uses OWIS PS10 over COM, Keithley 6220/6221 current sourcing, independent 2182/2182A or a source-linked delta nanovoltmeter, SR830 or Ethernet Ametek 7230 lock-in, and supported Lake Shore temperature devices. Ametek 7230 uses its native TCP protocol on port 50000 and does not require VISA for that connection. Use a hostname/IP, `host:50000`, or VISA-style `TCPIP0::host::50000::SOCKET` address.
+
+Delta verifies the nanovoltmeter through the source, without opening a separate PC interface to it. Reserve the source RS232 connection for the nanovoltmeter; connect the PC using GPIB or supported Ethernet. Physical trigger wiring and bench timing still require commissioning.
+
+Before acquisition, initialize/reference the PS10 using its controller tools and enter calibrated counts per turn and velocity conversion. The service does not automatically home or change stage limits. Rotation is limited to 1.2 Hz. Optical position falls back to verified OWIS position before acquisition when unavailable; encoder failure during acquisition aborts to avoid changing the angular origin. TTL reference checks use the selected timeout and reject loss of lock or the wrong sideband frequency.
+
+The engine implements DC steps/scans, automatic delta reversal, signed current sweeps for AC-field/DC-current fits, sideband acquisition and measured-cycle CHIRP rotation. It validates limits, checks source compliance/temperature/reference faults, switches outputs off after success or failure, and aborts if UI polling stops. Completed and partial projects are saved in `rust-backend/data/`. Keep the terminal open during acquisition; use Abort before closing it. Windows Ctrl+C requests cleanup, although disconnects or stalled native drivers can prevent confirmation.
+
+## Verification
+
+```powershell
+cargo test --manifest-path rust-backend/Cargo.toml
+```
+
+Tests use fake instruments and a TCP protocol emulator. They cover acquisition, cleanup, limits, fallback, heartbeat, autosave, Ametek framing and HTTP origin/token enforcement, including a GitHub Pages origin. These checks do not replace testing against the actual bench instruments.
+
+Live parameter updates are validated through `/api/update` and take effect at the next program-step boundary. Every run stores the method, sample and hardware settings used. `/api/pause` interrupts acquisition, saves partial raw data and cleans up outputs before reporting `paused`; native sessions are released for connection checks. `/api/resume` revalidates configuration and repeats the interrupted step, restoring the preceding temperature setpoint/stability if applicable. Hardware or method-principle changes require pause; active/completed temperature steps and sequence structure cannot be changed. Browser polling must continue while paused.

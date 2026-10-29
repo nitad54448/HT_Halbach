@@ -14,8 +14,17 @@
 <main>
 
 <section class="page" id="p-hardware" data-title="Hardware">
-  <h1>Hardware</h1>
-  <p class="intro">Test mode starts with all instruments available and the temperature controller connected automatically. Use the prepared CHIRP setup or change the settings below, then open <b>Run</b> to start the test program. All readings are synthetic; no physical devices are accessed.</p>
+  <h1>Devices and connections</h1><div id="device-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
+  <div class="card"><div class="grid g3">
+    <div class="field"><label>Backend</label><select data-bind="hardware.backend"><option value="real">Real instruments</option><option value="simulation">Simulation (synthetic data)</option></select></div>
+    <div class="field"><label>Temperature</label><select data-bind="hardware.temperature"><option value="off">OFF</option><option value="read">Read only</option><option value="control">Read and control</option></select></div>
+  </div><p>Select the devices for your method, then check every connection before continuing to Sample. Simulation checks do not verify physical equipment.</p>
+  </div>
+  <div class="card" id="rust-settings"><h2>Local Rust service</h2><div class="grid g2">
+    <div class="field"><label for="rust-url">Service URL</label><input id="rust-url" type="url" value="http://127.0.0.1:8765"></div>
+    <div class="field"><label for="rust-token">Pairing token</label><input id="rust-token" type="password" autocomplete="off" placeholder="Copy from the local Rust service terminal"><small>Kept in this browser session; excluded from presets and project files.</small></div>
+  </div><p class="muted">Start halbach-service locally. Live Server uses port 5501 in this project. For GitHub Pages, add --allow-origin https://your-account.github.io to the service command and allow browser access to the local service.</p><div id="rust-settings-status" role="status"></div></div>
+  <p class="intro">Choose instruments compatible with the selected method. Position comes from the OWIS controller (absolute angle) or an optical encoder through NI 9361 / cDAQ-9183 (relative angle). If the external reader is unavailable, CHECK connections checks the OWIS angle instead.</p>
   <div class="subtabs" role="tablist" id="hw-subtabs">
     <button data-sub="temp" class="active">Temperature control</button><button data-sub="magnet">Magnet</button><button data-sub="source">Current source</button><button data-sub="measure">Measure</button>
   </div>
@@ -32,12 +41,17 @@
   <div class="card subpane" data-pane="magnet"><h2>Rotating Halbach magnet</h2><div class="grid g3">
       <div class="field"><label>Rotation controller</label><select data-bind="hardware.magnet.rotator" data-opts="ROTATOR"></select></div>
       <div class="field"><label>Port / address</label><input data-bind="hardware.magnet.rotator_addr" placeholder="e.g. COM3"></div>
+      <div class="field"><label>OWIS baud rate</label><input type="number" data-bind="hardware.magnet.baud" data-num></div>
+      <div class="field"><label>OWIS counts per revolution (calibration)</label><input type="number" data-bind="hardware.magnet.counts_per_turn" data-num data-nullable><small>Required to convert the controller counter to degrees. No homing or motion occurs during checks.</small></div>
+      <div class="field"><label>OWIS velocity command units per count/second</label><input type="number" min="0" step="any" data-bind="hardware.magnet.velocity_scale" data-num data-nullable><small>Calibrate for the motor/firmware. Real runs require an initialized, referenced PS10 axis; existing acceleration and limit settings are retained.</small></div>
       <div></div>
-      <div class="field"><label>Position detector</label><select data-bind="hardware.magnet.encoder" data-opts="ENCODER"></select></div>
+      <div class="field"><label>Position source</label><select data-bind="hardware.magnet.encoder" data-opts="ENCODER"></select><small>External optical angle is relative and needs a calibrated reference. Unavailable encoder/cDAQ falls back to OWIS absolute position.</small></div>
+      <div class="field"><label>cDAQ-9183 Ethernet host / IP</label><input data-bind="hardware.magnet.host" placeholder="192.168.1.100"></div>
       <div class="field"><label>Module / channel</label><input data-bind="hardware.magnet.encoder_addr" placeholder="e.g. cDAQ1Mod2/ctr0"></div>
+      <div class="field"><label>Optical encoder pulses per revolution (before ×4 decoding)</label><input type="number" min="1" data-bind="hardware.magnet.encoder_ppr" data-num data-nullable></div>
       <div></div>
       <div class="field"><label>Field-angle zero offset (deg)</label><input type="number" step="any" data-bind="hardware.magnet.angle_offset_deg" data-num><small>Encoder zero to +X field direction, from calibration.</small></div>
-      <div class="field"><label>Encoder direction</label><select data-bind="hardware.magnet.dir_sign" data-num><option value="1">+1 (encoder angle = field angle)</option><option value="-1">−1 (reversed)</option></select></div>
+      <div class="field"><label>Position direction</label><select data-bind="hardware.magnet.dir_sign" data-num><option value="1">+1 (position angle = field angle)</option><option value="-1">−1 (reversed)</option></select></div>
       <div class="field"><label>Calibrated field magnitude B (T)</label><input type="number" min="0" step="any" data-bind="sample.B_T" data-num><small>At the sample position.</small></div>
     </div></div>
   <div class="card subpane" data-pane="source"><h2>Current source</h2><div class="grid g3">
@@ -48,49 +62,31 @@
       <div class="field"><label>Software current limit (mA, RMS for AC)</label><input type="number" step="any" data-bind="hardware.source.max_mA" data-num><small>Modes requesting more are rejected. Verify peak vs RMS units per model.</small></div>
     </div></div>
   <div class="card subpane" data-pane="measure"><h2>Voltage measurement</h2><div class="grid g3">
-      <div class="field"><label>Nanovoltmeter (DC)</label><select data-bind="hardware.measure.volt" data-opts="VOLT"></select></div>
+      <p id="delta-info" hidden>Delta automatically sources +I and −I and synchronizes the 2182/2182A nanovoltmeter over the source's RS-232 and Trigger Link. Only the 6220/6221 needs a PC interface.</p>
+      <div class="field"><label>DC voltage acquisition</label><select data-bind="hardware.measure.dc_mode"><option value="independent">Independent nanovoltmeter</option><option value="delta">Source-linked delta mode</option></select></div><div class="field"><label>Nanovoltmeter (DC)</label><select data-bind="hardware.measure.volt" data-opts="VOLT"></select></div>
       <div class="field"><label>Address</label><input data-bind="hardware.measure.volt_addr"></div><div></div>
       <div class="field"><label>Lock-in 1</label><select data-bind="hardware.measure.lockin1" data-opts="LOCKIN"></select></div>
       <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin1_addr"><small>Two SR830s must have distinct GPIB addresses.</small></div><div></div>
       <div class="field"><label>Lock-in 2 (optional)</label><select data-bind="hardware.measure.lockin2" data-opts="LOCKIN"></select></div>
       <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin2_addr"></div><div></div>
-      <div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div>
-    </div><div id="measure-msg" style="margin-top:10px"></div></div>
+    </div><div id="measure-msg" style="margin-top:10px"></div><button class="secondary" id="check-reference">Wait for TTL Ref In lock</button><small id="reference-result" role="status">For a live TTL signal; does not start the motor.</small></div>
   <div class="card"><h2>Declared instruments</h2><div id="hw-summary"></div></div>
+  <div class="card"><button class="primary" id="check-connections" disabled>CHECK connections</button><p id="check-requirements"></p><div id="connection-results" role="status" aria-live="polite"></div></div>
+  <div class="actions"><button class="secondary" id="save-preset">Save method &amp; devices as JSON</button><span id="preset-save-status" role="status"></span></div>
 </section>
 
 <section class="page" id="p-mode" data-title="Mode">
-  <h1>Measurement mode</h1>
-  <p class="intro">Only modes supported by the instruments declared on the Hardware page can be selected. Unavailable modes say what is missing.</p>
-  <div class="grid g3" id="mode-cards"></div>
+  <p class="intro">Choose the method first: DC field with steps or scans, AC field with DC or AC current (sideband detection), or CHIRP. You can also load a preset method defined in JSON funtion. Select compatible devices on the next tab.</p>
+  <div class="grid method-choices" id="mode-cards"></div>
+  <input id="preset-file" type="file" accept=".json,application/json" hidden>
   <div id="mode-msg" style="margin-top:16px"></div>
-  <div class="card mode-panel" id="mp-chirp" hidden><h2>CHIRP parameters</h2><div class="grid g3">
-      <div class="field"><label>Carrier frequency (Hz)</label><input type="number" data-bind="method.carrier_hz" data-num><small>Guide range 500-900 Hz.</small></div>
-      <div class="field"><label>Current levels, RMS (mA, comma-separated)</label><input id="f-levels"></div>
-      <div class="field"><label>Rotation frequency (Hz)</label><input type="number" step="any" data-bind="method.rot_hz" data-num><small>Guide range 0.1-0.3 Hz.</small></div>
-      <div class="field"><label>Direction</label><select data-bind="method.direction"><option value="both">Both</option><option value="cw">Clockwise</option><option value="ccw">Counter-clockwise</option></select></div>
-      <div class="field"><label>Dwell per level (s)</label><input type="number" data-bind="method.dwell_s" data-num></div>
-      <div class="field"><label>Post-step mask (s)</label><input type="number" step="any" data-bind="method.mask_s" data-num></div>
+  <div id="method-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
+  <div class="card" id="principle-fixed" hidden><h2>DC field</h2><div class="grid g2">
+    <div class="field"><label>Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
+    <div class="field"><label>Angular acquisition</label><select data-bind="method.fixed.acq"><option value="step">Steps</option><option value="scan">Scans</option></select></div>
   </div></div>
-  <div class="card mode-panel" id="mp-fixed" hidden><h2>Fixed field parameters</h2><div class="grid g3">
-      <div class="field"><label>Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
-      <div class="field"><label>Angular acquisition</label><select data-bind="method.fixed.acq"><option value="step">Step and settle</option><option value="scan">Continuous scan</option></select></div>
-      <div class="field"><label>Current (mA)</label><input type="number" step="any" data-bind="method.fixed.I_mA" data-num><small>Peak or RMS: record in the sample notes.</small></div>
-      <div class="field" data-when="ac"><label>AC carrier frequency (Hz)</label><input type="number" data-bind="method.fixed.carrier_hz" data-num></div>
-      <div class="field" data-when="step"><label>Number of angles</label><input type="number" data-bind="method.fixed.n_angles" data-num></div>
-      <div class="field" data-when="step"><label>Settling time (s)</label><input type="number" step="any" data-bind="method.fixed.settle_s" data-num></div>
-      <div class="field" data-when="scan"><label>Rotation frequency (Hz)</label><input type="number" step="any" data-bind="method.fixed.rot_hz" data-num></div>
-      <div class="field" data-when="dc"><label>Reverse DC current at each angle</label><select data-bind="method.fixed.reverse" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
-  </div></div>
-  <div class="card mode-panel" id="mp-rotating" hidden><h2>Rotating field parameters</h2><div class="grid g3">
-      <div class="field"><label>Excitation / detection</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select></div>
-      <div class="field"><label>Current (mA)</label><input type="number" step="any" data-bind="method.rotating.I_mA" data-num></div>
-      <div class="field"><label>Rotation frequency (Hz)</label><input type="number" step="any" data-bind="method.rotating.rot_hz" data-num></div>
-      <div class="field" data-when="ac"><label>AC carrier frequency (Hz)</label><input type="number" data-bind="method.rotating.carrier_hz" data-num></div>
-      <div class="field" data-when="ac"><label>Sideband</label><select data-bind="method.rotating.sideband"><option value="lower">Lower (carrier − rotation)</option><option value="upper">Upper (carrier + rotation)</option></select></div>
-      <div class="field"><label>Acquisition duration (s)</label><input type="number" data-bind="method.rotating.duration_s" data-num></div>
-      <div class="field"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
-  </div></div>
+  <div class="card" id="principle-rotating" hidden><h2>AC field</h2><div class="field"><label>Excitation</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select></div><p>DC current uses field-frequency detection. AC current uses sideband detection.</p></div>
+  <div class="card" id="principle-chirp" hidden><h2>CHIRP</h2><p>AC current with interleaved amplitudes and continuous field rotation.</p></div>
 </section>
 
 <section class="page" id="p-sample" data-title="Sample">
@@ -107,7 +103,36 @@
 </section>
 
 <section class="page" id="p-temp" data-title="Temperature program">
-  <h1>Temperature program</h1>
+  <h1>Experiment setup</h1><p class="intro">Set measurement parameters here. During acquisition, apply changes for the next measurement; the current measurement keeps its original settings.</p><div class="actions"><button class="primary" id="apply-parameters">Apply parameters</button><span id="parameter-status" role="status"></span></div><div id="experiment-msg"></div><div class="card">      <div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div>
+</div>
+  <div class="card mode-panel" id="mp-chirp" hidden><h2>CHIRP parameters</h2><div class="grid g3">
+      <div class="field"><label>Carrier frequency (Hz)</label><input type="number" data-bind="method.carrier_hz" data-num><small>Guide range 500-900 Hz.</small></div>
+      <div class="field"><label>Current levels, RMS (mA, comma-separated)</label><input id="f-levels"></div>
+      <div class="field"><label>Maximum rotation frequency (Hz)</label><input type="number" min="0.001" max="1.2" step="any" data-bind="method.rot_hz" data-num><small>Constant-speed plateau, up to 1.2 Hz. Validate filter tracking at the selected maximum.</small></div>
+      <div class="field"><label>Direction</label><select data-bind="method.direction"><option value="both">Both</option><option value="cw">Clockwise</option><option value="ccw">Counter-clockwise</option></select></div>
+      <div class="field"><label>Cycles per current level and direction</label><input type="number" min="1" step="1" data-bind="method.cycles" data-num><small>Dwell is cycles / rotation frequency; the post-step mask must fit within it.</small></div>
+      <div class="field"><label>Post-step mask (s)</label><input type="number" step="any" data-bind="method.mask_s" data-num></div>
+  </div></div>
+  <div class="card mode-panel" id="mp-fixed" hidden><h2>Fixed field parameters</h2><div class="grid g3">
+      <div class="field"><label>Current (mA, RMS for AC)</label><input type="number" step="any" data-bind="method.fixed.I_mA" data-num><small>Delta uses the entered magnitude for +I and −I. AC source commands convert RMS to peak.</small></div>
+      <div class="field" data-when="volt"><label>Nanovoltmeter integration (PLC)</label><input type="number" min="1" max="50" step="1" data-bind="method.fixed.nplc" data-num><small>Channel 1 voltage, automatic range; whole PLC values for delta synchronization.</small></div>
+      <div class="field" data-when="ac"><label>AC carrier frequency (Hz)</label><input type="number" data-bind="method.fixed.carrier_hz" data-num></div>
+      <div class="field" data-when="step"><label>Number of angles</label><input type="number" data-bind="method.fixed.n_angles" data-num></div>
+      <div class="field" data-when="step"><label>Settling time (s)</label><input type="number" step="any" data-bind="method.fixed.settle_s" data-num></div>
+      <div class="field" data-when="scan"><label>Rotation frequency (Hz)</label><input type="number" min="0.001" max="1.2" step="any" data-bind="method.fixed.rot_hz" data-num></div>
+      <div class="field" data-when="dc"><label>Reverse DC current at each angle</label><select data-bind="method.fixed.reverse" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
+  </div></div>
+  <div class="card mode-panel" id="mp-rotating" hidden><h2>Rotating field parameters</h2><div class="grid g3">
+      <div class="field"><label>TTL reference lock timeout (s)</label><input type="number" min="0.1" max="600" step="any" data-bind="method.lock_timeout_s" data-num><small>Timeout for locking to the external Ref In signal.</small></div>
+      <div class="field" data-when="ac"><label>AC current RMS (mA)</label><input type="number" step="any" data-bind="method.rotating.I_mA" data-num></div>
+      <div class="field" data-when="dc"><label>DC currents (mA, comma-separated)</label><input id="f-dc-currents"><small>For example −5, −2.5, 0, 2.5, 5. The Hall voltage/current slope determines the Hall coefficient; no separate zero-current background is needed.</small></div>
+      <div class="field"><label>Rotation frequency (Hz)</label><input type="number" min="0.001" max="1.2" step="any" data-bind="method.rotating.rot_hz" data-num></div>
+      <div class="field" data-when="ac"><label>AC carrier frequency (Hz)</label><input type="number" data-bind="method.rotating.carrier_hz" data-num></div>
+      <div class="field" data-when="ac"><label>Sideband</label><select data-bind="method.rotating.sideband"><option value="lower">Lower (carrier − rotation)</option><option value="upper">Upper (carrier + rotation)</option></select></div>
+      <div class="field"><label>Acquisition duration per current (s)</label><input type="number" data-bind="method.rotating.duration_s" data-num></div>
+      <div class="field" data-when="ac"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
+  </div></div>
+<h2>Temperature program</h2>
   <p class="intro">Build a temperature program from a start, end and positive step size (cooling sweeps are supported). Each point ramps, waits for stability, then measures using the selected measurement mode. ?T means measured temperature minus target: every reading must stay within the instantaneous limit for the entire window, and the time-averaged |?T| must meet the mean limit. A timeout or abort switches the heater off. An end point is included only when reached by a whole step.</p>
   <div class="card"><div class="toolbar">
     <div class="field"><label>Add step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add</button>
@@ -147,6 +172,7 @@
     <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="i-live" style="width:auto;min-height:0"> follow latest run</label>
     <button class="secondary" id="i-refit">Refit</button></div>
   <div class="kpis" id="i-kpis"></div>
+  <div class="card" id="i-slope-card" hidden><h2>Hall voltage versus DC current</h2><canvas id="c-current-slope"></canvas><p id="i-slope-info"></p></div>
   <div class="grid g2" style="margin-top:16px">
     <div class="card"><h2>X vs field angle</h2><canvas id="c-xth"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>valid</span><span><i style="background:#566677"></i>masked</span><span><i style="background:#e3b96e"></i>fit</span></div></div>
     <div class="card"><h2>X, Y vs time</h2><canvas id="c-xt"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>X</span><span><i style="background:#80aaf9"></i>Y</span></div></div>
@@ -191,6 +217,6 @@
 <div class="pager" id="pager" style="max-width:1500px;margin:0 auto;padding:0 32px 40px"><button class="secondary" id="back">← Back</button><button class="primary" id="next">Next →</button></div>
 </main>
 <div id="report"></div>
-<script src="js/core.js"></script><script src="js/lakeshore.js"></script><script src="js/analysis.js"></script><script src="js/modes.js"></script><script src="js/sim.js"></script><script src="js/plot.js"></script><script src="js/app.js"></script>
+<script src="js/core.js"></script><script src="js/lakeshore.js"></script><script src="js/analysis.js"></script><script src="js/modes.js"></script><script src="js/connections.js"></script><script src="js/backend.js"></script><script src="js/sim.js"></script><script src="js/plot.js"></script><script src="js/app.js"></script>
 </body>
 </html>

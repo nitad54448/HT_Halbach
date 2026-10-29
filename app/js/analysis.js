@@ -85,13 +85,60 @@
       else o.warnings.push('Sheet resistance not set: mobility unavailable.');
       if (Math.abs(fit.D1) > 0.2 * Math.abs(fit.A1)) o.warnings.push('|D1| > 20% of |A1|: check angle calibration / phase.');
     } else o.warnings.push('cos(tilt) ≈ 0: ordinary Hall not extractable at this tilt.');
-    if (Math.abs(s) > 0.05) {
+    if (Math.abs(s) > 0.05 && Number.isFinite(fit.A2)) {
       const beta2 = fit.A2 / s; o.K = 2 * d * beta2 / (B * B);
       if (Math.abs(c) > 0.05 && sample.rsq_ohm > 0) o.C = 2 * sample.rsq_ohm * beta2 / Math.pow(fit.A1 / c, 2);
     }
     return o;
   }
 
-  const api = { lstsq, fitHarmonics, derive, E_CHARGE };
+  /** Fit signed first-harmonic voltage at each DC current, then voltage/current slope.
+   * A free intercept removes current-independent pickup without a separate background run. */
+  function fitCurrentSweep(s) {
+    const groups = new Map();
+    s.I.forEach((I, i) => { if ((!s.valid || s.valid[i]) && Number.isFinite(I)) { if (!groups.has(I)) groups.set(I, []); groups.get(I).push(i); } });
+    if (groups.size < 2) throw new Error('Current slope requires at least two distinct currents.');
+    const points = [...groups].map(([I, indices]) => {
+      const r = lstsq(indices.map(i => { const a = s.theta[i]; return [Math.cos(a), Math.sin(a), Math.sin(2*a), Math.cos(2*a), 1]; }), indices.map(i => s.X[i]));
+      return { I, voltage: r.coef[0], coefficients: r.coef, n: indices.length };
+    });
+    const slopes = [0, 1, 2, 3, 4].map(k => {
+      // With two current levels use within-level noise to propagate slope uncertainty.
+      const x = points.map(p => p.I), y = points.map(p => p.coefficients[k]);
+      const xm = x.reduce((a,b)=>a+b,0)/x.length, ym = y.reduce((a,b)=>a+b,0)/y.length;
+      const ss = x.reduce((a,v)=>a+(v-xm)**2,0), slope = x.reduce((a,v,i)=>a+(v-xm)*(y[i]-ym),0)/ss;
+      const intercept = ym-slope*xm, rss = x.reduce((a,v,i)=>a+(y[i]-intercept-slope*v)**2,0);
+      return { slope, intercept, error: x.length > 2 ? Math.sqrt(rss/(x.length-2)/ss) : null };
+    });
+    const fit = fitHarmonics(s);
+    ['A1', 'D1', 'A2', 'B2c', 'b0'].forEach((name,k) => { fit[name] = slopes[k].slope; if (slopes[k].error !== null) fit[name+'_err'] = slopes[k].error; });
+    fit.currentSlope = { points, slope: slopes[0].slope, intercept: slopes[0].intercept, slopeError: slopes[0].error };
+    return fit;
+  }
+  /** Real AC-field detection produces demodulated amplitudes, not angular traces.
+   * RMS X: DC-current field detection needs sqrt(2), AC sideband needs 2.
+   * Signed X requires an independently calibrated electrical/field reference phase. */
+  function fitFieldLockin(s, excitation) {
+    const groups=new Map(), gain=excitation==='dc'?Math.SQRT2:2;
+    s.I.forEach((I,i)=>{ if ((!s.valid || s.valid[i]) && Number.isFinite(s.X[i])) { if (!groups.has(I)) groups.set(I,[]); groups.get(I).push(s.X[i]*gain); } });
+    const points=[...groups].map(([I,ys])=>{ const voltage=ys.reduce((a,b)=>a+b,0)/ys.length; return {I,voltage,n:ys.length,variance:ys.length>1?ys.reduce((a,v)=>a+(v-voltage)**2,0)/(ys.length-1)/ys.length:0}; });
+    if (!points.length || points.every(p=>p.I===0)) throw new Error('No nonzero-current lock-in samples.');
+    if (excitation==='dc' && points.length<2) throw new Error('DC slope requires multiple currents.');
+    let slope,intercept,error;
+    if (points.length===1) { slope=points[0].voltage/points[0].I; intercept=0; error=Math.sqrt(points[0].variance)/Math.abs(points[0].I); }
+    else {
+      const xm=points.reduce((a,p)=>a+p.I,0)/points.length, ym=points.reduce((a,p)=>a+p.voltage,0)/points.length;
+      const ss=points.reduce((a,p)=>a+(p.I-xm)**2,0);
+      slope=points.reduce((a,p)=>a+(p.I-xm)*(p.voltage-ym),0)/ss; intercept=ym-slope*xm;
+      const propagated=points.reduce((a,p)=>a+(p.I-xm)**2*p.variance,0)/ss**2;
+      const residual=points.reduce((a,p)=>a+(p.voltage-intercept-slope*p.I)**2,0);
+      error=Math.sqrt(Math.max(propagated, points.length>2?residual/(points.length-2)/ss:0));
+    }
+    return {A1:slope,A1_err:error,D1:null,D1_err:null,A2:null,A2_err:null,B2c:null,b0:null,o0:intercept,
+      n:points.reduce((a,p)=>a+p.n,0),levels:points.length,cond:1,rms:Math.sqrt(points.reduce((a,p)=>a+p.variance*p.n,0)/points.length),
+      currentSlope:{points,slope,intercept,slopeError:error},
+      warnings:['Lock-in amplitude normalization assumes calibrated phase, sinusoidal field and RMS current.', ...(points.length===1?['No zero-current level: current-independent pickup was not subtracted.']:[])]};
+  }
+  const api = { lstsq, fitHarmonics, fitCurrentSweep, fitFieldLockin, derive, E_CHARGE };
   if (typeof module !== 'undefined') module.exports = api; else (root.HH = root.HH || {}, Object.assign(root.HH, api));
 })(typeof window !== 'undefined' ? window : globalThis);

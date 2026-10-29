@@ -12,9 +12,12 @@ const M = require('../js/modes.js'), A = require('../js/analysis.js'), S = requi
   assert.strictEqual(other.hardware.source.model, 'K6221', 'test projects have independent settings');
   const p = newProject(), h = p.hardware;
   assert(Object.values(M.availability(h)).every(a => !a.ok), 'nothing available with no instruments');
-  h.magnet.rotator = 'OWISPS10'; h.magnet.encoder = 'NI9413';
+  h.magnet.rotator = 'OWISPS10'; h.magnet.encoder = 'NI9361';
   assert(Object.values(M.availability(h)).every(a => !a.ok), 'needs source and detector');
   h.source.model = 'K6220'; h.measure.volt = 'K2182A';
+  h.magnet.encoder = '';
+  assert(M.availability(h).fixed.variants.dc.ok, 'OWIS absolute position supports acquisition without optical encoder');
+  h.magnet.encoder = 'NI9361';
   let av = M.availability(h);
   assert(av.fixed.variants.dc.ok && !av.fixed.variants.ac.ok && !av.chirp.ok && !av.rotating.ok);
   assert(/DC only/.test(av.fixed.variants.ac.missing.join()));
@@ -23,11 +26,41 @@ const M = require('../js/modes.js'), A = require('../js/analysis.js'), S = requi
   h.source.model = 'MFLI'; av = M.availability(h);
   assert(!av.fixed.variants.dc.ok && av.chirp.ok);
   h.source.model = 'K6221';
+  p.method.kind = 'fixed'; p.method.fixed.excitation = 'delta';
+  assert.deepStrictEqual(Object.keys(M.availability(h).fixed.variants),['dc','ac']);
+  p.method.fixed.reverse = false;
+  assert(S.schedule(p.method, 20).some(s => s.I < 0), 'delta reverses automatically');
+  p.method.fixed.rot_hz = 1.21; p.method.fixed.acq = 'scan';
+  assert(M.modeErrors(p).some(e => /1.2 Hz/.test(e)));
+  p.method.fixed.rot_hz = 0.2; p.method.fixed.acq = 'step';
   p.method.kind = 'chirp'; assert.deepStrictEqual(M.modeErrors(p), []);
   p.method.levels_mA = [50]; assert(M.modeErrors(p).some(e => /exceeds/.test(e))); p.method.levels_mA = [1];
   p.method.kind = 'fixed'; p.method.fixed.excitation = 'dc'; h.measure.volt = ''; assert(M.modeErrors(p).some(e => /nanovoltmeter/.test(e)));
   h.measure.volt = 'K2182A'; assert.deepStrictEqual(M.modeErrors(p), []);
   p.method.kind = 'rotating'; p.method.rotating.duration_s = 2; assert(M.modeErrors(p).some(e => /full rotation/.test(e)));
+  p.method.rotating.duration_s = 30; p.method.rotating.excitation = 'dc';
+  p.method.rotating.currents_mA = [-5, -2.5, 0, 2.5, 5];
+  assert.deepStrictEqual(M.modeErrors(p), []);
+  p.method.rotating.currents_mA = [-50, 0, 1]; assert(M.modeErrors(p).some(e => /exceeds/.test(e)));
+  p.method.rotating.currents_mA = [0,0]; assert(M.modeErrors(p).some(e => /distinct/.test(e)));
+  p.method.rotating.currents_mA = [-5, -2.5, 0, 2.5, 5];
+  const sweep = await S.acquire(p, {}, () => 300, 5);
+  sweep.samples.X = sweep.samples.X.map((v,i) => v + 0.0002 * Math.cos(sweep.samples.theta[i]));
+  const slopeFit = A.fitCurrentSweep(sweep.samples);
+  assert(Math.abs(slopeFit.A1 / sweep.truth.A1 - 1) < 1e-3, 'current-independent angular pickup must not bias current slope');
+  assert(Math.abs(slopeFit.currentSlope.intercept - 0.0002) < 1e-6);
+  const demod = {I:[],X:[],valid:[]};
+  for (const I of [-0.005,0,0.005]) for (let j=0;j<10;j++) {demod.I.push(I);demod.X.push((2*I+0.0001)/Math.SQRT2);demod.valid.push(1);}
+  const demodFit=A.fitFieldLockin(demod,'dc');
+  assert(Math.abs(demodFit.A1-2)<1e-10, 'RMS field-reference normalization must recover V/I slope');
+  assert(Math.abs(demodFit.currentSlope.intercept-0.0001)<1e-10);
+  assert.strictEqual(demodFit.A2,null,'field-frequency demodulation does not measure a planar angular coefficient');
+  assert.strictEqual(S.schedule(p.method,20).length, 5, 'no extra zero background segment for DC sweeps');
+  p.method.kind = 'chirp'; p.method.cycles = 12; p.method.rot_hz = 1.2;
+  assert.strictEqual(M.chirpDwell(p.method), 10);
+  assert.strictEqual(S.schedule(p.method,20)[0].n, 200);
+  p.method.lock_timeout_s = 0; assert(M.modeErrors(p).some(e => /timeout/.test(e)));
+  p.method.lock_timeout_s = 30;
   // every mode yields fittable simulated data that recovers the truth
   p.sample = { id: 't', thickness_nm: 100, B_T: 1, tilt_deg: 0, rsq_ohm: null };
   const cases = [['chirp', {}], ['fixed', { excitation: 'ac', acq: 'step' }], ['fixed', { excitation: 'dc', acq: 'step', reverse: true }],

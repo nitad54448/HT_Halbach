@@ -1,0 +1,11 @@
+{
+  "format": "halbach-hall-preset",
+  "name": "AC field / signed DC current sweep (edit bench addresses)",
+  "method": { "kind": "rotating", "lock_timeout_s": 30, "rotating": { "excitation": "dc", "currents_mA": [-5, -2.5, 0, 2.5, 5], "rot_hz": 0.2, "duration_s": 30, "background": false } },
+  "hardware": {
+    "backend": "real", "temperature": "off",
+    "magnet": { "rotator": "OWISPS10", "rotator_addr": "COM3", "baud": 9600, "encoder": "" },
+    "source": { "model": "K6221", "address": "GPIB0::13::INSTR", "max_mA": 10, "compliance_V": 10 },
+    "measure": { "lockin1": "SR830", "lockin1_addr": "GPIB0::8::INSTR" }
+  }
+}

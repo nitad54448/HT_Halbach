@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+backend/data/
+.browser-test/
+.tools/
+rust-backend/target/
+rust-backend/data/

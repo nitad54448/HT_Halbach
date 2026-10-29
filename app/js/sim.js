@@ -7,6 +7,7 @@
   const core = (typeof require !== 'undefined' && typeof module !== 'undefined') ? require('./core.js') : HH;
   const { Logger } = core;
   const analysis = (typeof require !== 'undefined' && typeof module !== 'undefined') ? require('./analysis.js') : HH;
+  const modes = (typeof require !== 'undefined' && typeof module !== 'undefined') ? require('./modes.js') : HH;
 
   function rng(seed) { let s = seed >>> 0 || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
   function gauss(r) { return Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r()); }
@@ -24,30 +25,31 @@
     const segs = [], TWO_PI = 2 * Math.PI;
     if (m.kind === 'fixed') {
       const f = m.fixed, I = f.I_mA * 1e-3;
-      if (f.acq === 'scan') segs.push({ n: Math.round(fs / m.fixed.rot_hz), I, mask: 1, th: (tl, t) => TWO_PI * f.rot_hz * tl, dir: 1 });
-      else for (let k = 0; k < f.n_angles; k++) for (const sgn of (f.excitation === 'dc' && f.reverse ? [1, -1] : [1]))
+      if (f.acq === 'scan') segs.push({ n: Math.round(fs / m.fixed.rot_hz), I, delta: f.excitation === 'delta', mask: 1, th: (tl, t) => TWO_PI * f.rot_hz * tl, dir: 1 });
+      else for (let k = 0; k < f.n_angles; k++) for (const sgn of (f.excitation === 'delta' || (f.excitation === 'dc' && f.reverse) ? [1, -1] : [1]))
         segs.push({ n: Math.round((f.settle_s + 2) * fs), I: sgn * I, mask: f.settle_s, th: () => TWO_PI * k / f.n_angles, dir: 1 });
     } else if (m.kind === 'rotating') {
       const r = m.rotating, I = r.I_mA * 1e-3, n = Math.round(r.duration_s * fs);
-      segs.push({ n, I, mask: 1, th: (tl, t) => TWO_PI * r.rot_hz * tl, dir: 1 });
-      if (r.background) segs.push({ n: Math.round(10 * fs), I: 0, mask: 1, th: (tl) => TWO_PI * r.rot_hz * (tl + r.duration_s), dir: 1 });
+      for (const level of (r.excitation === 'dc' ? r.currents_mA : [r.I_mA])) segs.push({ n, I: level * 1e-3, mask: 1, th: (tl, t) => TWO_PI * r.rot_hz * tl, dir: 1 });
+      if (r.excitation === 'ac' && r.background) segs.push({ n: Math.round(10 * fs), I: 0, mask: 1, th: (tl) => TWO_PI * r.rot_hz * (tl + r.duration_s), dir: 1 });
     } else {
       const dirs = m.direction === 'both' ? [1, -1] : [m.direction === 'ccw' ? -1 : 1];
       for (const dir of dirs) for (const lvl of m.levels_mA)
-        segs.push({ n: Math.round(m.dwell_s * fs), I: lvl * 1e-3, mask: m.mask_s, th: (tl, t) => dir * TWO_PI * m.rot_hz * t, dir });
+        segs.push({ n: Math.round(modes.chirpDwell(m) * fs), I: lvl * 1e-3, mask: m.mask_s, th: (tl, t) => dir * TWO_PI * m.rot_hz * t, dir });
     }
     return segs;
   }
 
   /** Acquire one run in the selected mode. ctx: {T_set, checkpoint()}. Returns the run record. */
   async function acquire(project, ctx, getT, seed) {
-    const m = project.method, S = project.sample, r = rng(seed || Math.floor(Math.random() * 1e9));
+    const m = JSON.parse(JSON.stringify(project.method)), S = project.sample, r = rng(seed || Math.floor(Math.random() * 1e9));
+    if(modes.isDelta(project)) m.fixed.excitation='delta';
     const T = getT(), film = toyFilm(T, S), fs = 20; // lock-in output sample rate (Hz)
     const out = { t: [], theta: [], X: [], Y: [], I: [], T: [], valid: [], dir: [] };
     let t = 0; const sigma = 2e-7, contact = 3e-6, tau = Math.max(m.tc_ms / 1000, 0.05) / 3;
     for (const seg of schedule(m, fs)) {
       for (let k = 0; k < seg.n; k++, t += 1 / fs) {
-        const tl = k / fs, th = seg.th(tl, t), settle = Math.exp(-tl / tau), I = seg.I;
+        const tl = k / fs, th = seg.th(tl, t), settle = Math.exp(-tl / tau), I = seg.I * (seg.delta && k % 2 ? -1 : 1);
         const hall = film.A1 * Math.cos(th) + film.A2 * Math.sin(2 * th);
         const Xv = I * hall + I * contact + 1e-7 + settle * I * film.rsq * 0.05 + sigma * gauss(r); // transient removed by the mask
         out.t.push(t); out.theta.push(th); out.X.push(Xv); out.Y.push(sigma * 0.3 * gauss(r)); out.I.push(I);

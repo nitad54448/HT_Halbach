@@ -48,18 +48,19 @@
       simulated: true,
       sample: { id: '', thickness_nm: 100, width_um: 100, length_um: 500, tilt_deg: 0, B_T: 1.0, rsq_ohm: null, notes: '' },
       hardware: {
+        backend: 'real', temperature: 'off',
         tempController: { model: 'LS335', address: 'GPIB0::12::INSTR', input: 'A', loop: 1, maxK: 400, maxRateKmin: 10 },
-        magnet: { rotator: '', rotator_addr: '', encoder: '', encoder_addr: '', angle_offset_deg: 0, dir_sign: 1 },
+        magnet: { rotator: '', rotator_addr: '', baud: 9600, counts_per_turn: null, velocity_scale: null, encoder: '', encoder_addr: '', angle_offset_deg: 0, dir_sign: 1 },
         source: { model: '', address: '', compliance_V: 10, max_mA: 10 },
-        measure: { volt: '', volt_addr: '', lockin1: '', lockin1_addr: '', lockin2: '', lockin2_addr: '' },
+        measure: { volt: '', volt_addr: '', dc_mode: 'independent', lockin1: '', lockin1_addr: '', lockin2: '', lockin2_addr: '' },
       },
       method: {
-        kind: '', tc_ms: 100,
+        kind: '', tc_ms: 100, lock_timeout_s: 30,
         // CHIRP
-        carrier_hz: 700, levels_mA: [0.5, 1, 2], rot_hz: 0.2, dwell_s: 20, mask_s: 3, direction: 'both',
+        carrier_hz: 700, levels_mA: [0.5, 1, 2], rot_hz: 1.2, cycles: 6, dwell_s: 20, mask_s: 3, direction: 'both',
         // Gunes 2017 sections 3.4.1 and 3.4.2
-        fixed: { excitation: 'ac', acq: 'step', I_mA: 1, carrier_hz: 700, n_angles: 36, settle_s: 2, rot_hz: 0.05, reverse: true },
-        rotating: { excitation: 'ac', I_mA: 1, rot_hz: 0.2, carrier_hz: 700, sideband: 'lower', duration_s: 60, background: true },
+        fixed: { excitation: 'ac', acq: 'step', I_mA: 1, nplc: 1, carrier_hz: 700, n_angles: 36, settle_s: 2, rot_hz: 0.05, reverse: true },
+        rotating: { excitation: 'ac', currents_mA: [-5, -2.5, 0, 2.5, 5], I_mA: 1, rot_hz: 0.2, carrier_hz: 700, sideband: 'lower', duration_s: 60, background: true },
       },
       tempProgram: [],
       runs: [],        // one per measurement step: {id, T_set, T_mean, started, fit, samples:{t,theta,X,Y,I,T}, flags}
@@ -73,7 +74,8 @@
     const p = newProject();
     p.sample.id = 'TEST-001';
     p.sample.notes = 'Synthetic test sample. All instruments and measurements are simulated.';
-    Object.assign(p.hardware.magnet, { rotator: 'OWISPS10', rotator_addr: 'SIM::ROTATOR', encoder: 'NI9413', encoder_addr: 'SIM::ENCODER' });
+    Object.assign(p.hardware.magnet, { rotator: 'OWISPS10', rotator_addr: 'SIM::ROTATOR', encoder: 'NI9361', encoder_addr: 'SIM::ENCODER', host: 'SIM::CHASSIS' });
+    p.hardware.backend = 'simulation'; p.hardware.temperature = 'control';
     Object.assign(p.hardware.source, { model: 'K6221', address: 'GPIB0::13::INSTR' });
     Object.assign(p.hardware.measure, { volt: 'K2182A', volt_addr: 'GPIB0::7::INSTR', lockin1: 'SR830', lockin1_addr: 'GPIB0::8::INSTR', lockin2: 'SR830', lockin2_addr: 'GPIB0::9::INSTR' });
     p.method.kind = 'chirp';

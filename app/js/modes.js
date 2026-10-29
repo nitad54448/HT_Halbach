@@ -3,29 +3,34 @@
   'use strict';
   const SOURCES = { K6220: { name: 'Keithley 6220', ac: false, dc: true }, K6221: { name: 'Keithley 6221', ac: true, dc: true },
     LS155: { name: 'Lake Shore 155', ac: true, dc: true }, MFLI: { name: 'Zurich MFLI (signal output)', ac: true, dc: false } };
-  const VOLT = { K2182A: 'Keithley 2182A' };
+  const VOLT = { K2182: 'Keithley 2182', K2182A: 'Keithley 2182A' };
   const LOCKIN = { SR830: 'SRS SR830', MFLI: 'Zurich MFLI', AMETEK7230: 'Ametek 7230' };
-  const ROTATOR = { OWISPS10: 'OWIS PS10' }, ENCODER = { NI9413: 'NI 9413 (cDAQ)' };
+  const ROTATOR = { OWISPS10: 'OWIS PS10' }, ENCODER = { NI9361: 'External optical encoder: NI 9361 / cDAQ-9183' };
   const MODES = {
-    fixed: { label: 'Fixed field: angular measurement', ref: 'Gunes et al. §3.4.1', variants: ['dc', 'ac'],
+    fixed: { label: 'DC field: steps or scans', ref: 'Gunes et al. §3.4.1', variants: ['dc', 'ac'],
       text: 'Voltage at selected field angles (step and settle) or while scanning through angles. DC current with a nanovoltmeter, or AC current with a lock-in.' },
-    rotating: { label: 'Rotating field: continuous detection', ref: 'Gunes et al. §3.4.2', variants: ['dc', 'ac'],
+    rotating: { label: 'AC field: DC or AC current', ref: 'Gunes et al. §3.4.2', variants: ['dc', 'ac'],
       text: 'Continuously rotating field with a lock-in: DC current with field-frequency detection, or AC current with sideband detection.' },
     chirp: { label: 'CHIRP: current-hopping interleaved rotation', ref: 'CHIRP guide', variants: ['ac'],
       text: 'AC carrier, slowly rotating field and interleaved current amplitudes; lock-in X/Y recorded against calibrated field angle.' },
   };
   const EXC = { dc: 'DC current', ac: 'AC current' };
+  const MAX_ROT_HZ = 1.2;
+  const isDelta = p => p.method.kind === 'fixed' && (p.method.fixed.excitation === 'delta' || (p.method.fixed.excitation === 'dc' && p.hardware.measure.dc_mode === 'delta'));
+  const usesVoltmeter = m => m.kind === 'fixed' && ['dc', 'delta'].includes(m.fixed.excitation);
+  function chirpDwell(m) { return m.cycles ? m.cycles / m.rot_hz : m.dwell_s; }
 
   /** Missing requirements for one mode + excitation, given hardware (project.hardware). [] means available. */
   function missing(h, kind, exc) {
     const m = [], src = SOURCES[h.source.model];
     if (!h.magnet.rotator) m.push('rotation controller');
-    if (!h.magnet.encoder) m.push('position detector');
+    // OWIS provides absolute position without an external encoder/DAQ.
     if (!src) m.push('current source');
     else if (exc === 'ac' && !src.ac) m.push('AC-capable current source (' + src.name + ' is DC only)');
-    else if (exc === 'dc' && !src.dc) m.push('DC-capable current source (' + src.name + ' is AC only)');
-    if (kind === 'fixed' && exc === 'dc') { if (!h.measure.volt) m.push('nanovoltmeter'); }
+    else if (['dc', 'delta'].includes(exc) && !src.dc) m.push('DC-capable current source (' + src.name + ' is AC only)');
+    if (kind === 'fixed' && ['dc', 'delta'].includes(exc)) { if (!h.measure.volt) m.push('nanovoltmeter'); }
     else if (!h.measure.lockin1 && !h.measure.lockin2) m.push('lock-in amplifier');
+    if (kind === 'fixed' && (exc === 'delta' || (exc === 'dc' && h.measure.dc_mode === 'delta')) && !['K6220', 'K6221'].includes(h.source.model)) m.push('Keithley 6220 or 6221 for delta mode');
     return m;
   }
   /** {kind: {ok, variants: {dc:{ok, missing}, ac:{...}}}} */
@@ -39,24 +44,44 @@
     return out;
   }
   function excitationOf(m) { return m.kind === 'chirp' ? 'ac' : m.kind ? m[m.kind].excitation : null; }
+  function principle(m) { return {kind:m.kind, excitation:excitationOf(m)==='delta'?'dc':excitationOf(m), acquisition:m.kind==='fixed'?m.fixed.acq:null}; }
+  function principleErrors(m) {
+    if(!MODES[m.kind]) return ['Choose a measurement method.'];
+    const errors=[];
+    if(!MODES[m.kind].variants.includes(excitationOf(m))) errors.push('Choose DC current or AC current.');
+    if(m.kind==='fixed'&&!['step','scan'].includes(m.fixed.acq)) errors.push('Choose steps or scans.');
+    return errors;
+  }
 
-  function modeErrors(p) {
+  function modeErrors(p, checkHardware = true) {
     const m = p.method, h = p.hardware, e = [];
     if (!m.kind) return ['No measurement mode selected.'];
+    if (!MODES[m.kind]) return ['Unknown measurement mode.'];
     const exc = excitationOf(m), mm = missing(h, m.kind, exc);
-    if (mm.length) e.push('Selected mode is not available: needs ' + mm.join(', ') + '.');
-    const maxmA = h.source.max_mA, pos = v => v > 0;
-    const levels = m.kind === 'chirp' ? m.levels_mA : [m[m.kind].I_mA];
-    if (!levels.length || !levels.every(pos)) e.push('Current must be positive.');
-    else if (maxmA > 0 && Math.max(...levels) > maxmA) e.push(`Current ${Math.max(...levels)} mA exceeds the source limit of ${maxmA} mA (Current source tab).`);
-    if (!(m.tc_ms > 0)) e.push('Lock-in time constant must be > 0 (Measure tab).');
+    if (checkHardware && mm.length) e.push('Selected mode is not available: needs ' + mm.join(', ') + '.');
+    if (!MODES[m.kind].variants.includes(exc)) e.push('Select a valid excitation.');
+    const maxmA = h.source.max_mA, pos = v => Number.isFinite(v) && v > 0;
+    const sweep = m.kind === 'rotating' && exc === 'dc';
+    const levels = m.kind === 'chirp' ? m.levels_mA : sweep ? m.rotating.currents_mA : [m[m.kind].I_mA];
+    if (!Array.isArray(levels) || !levels.length || !levels.every(v => sweep ? Number.isFinite(v) : pos(v))) e.push('Enter valid current levels (positive amplitudes except for DC current sweeps).');
+    else {
+      if (sweep && new Set(levels).size < 2) e.push('DC current slope requires at least two distinct currents.');
+      if (maxmA > 0 && Math.max(...levels.map(Math.abs)) > maxmA) e.push(`Current exceeds the source limit of ${maxmA} mA (Current source tab).`);
+    }
+    if (!usesVoltmeter(m) && !(m.tc_ms > 0)) e.push('Lock-in time constant must be > 0 (Experiment setup).');
+    if (!usesVoltmeter(m) && (!pos(m.lock_timeout_s) || m.lock_timeout_s > 600)) e.push('Reference lock timeout must be > 0 and at most 600 seconds.');
+    const rotation = m.kind === 'chirp' ? m.rot_hz : m[m.kind].rot_hz;
+    if ((m.kind !== 'fixed' || m.fixed.acq === 'scan') && (!pos(rotation) || rotation > MAX_ROT_HZ)) e.push('Rotation frequency must be > 0 and at most 1.2 Hz.');
     if (m.kind === 'chirp') {
       if (!pos(m.carrier_hz)) e.push('Carrier frequency must be > 0.');
       if (!pos(m.rot_hz)) e.push('Rotation frequency must be > 0.');
-      if (!pos(m.dwell_s) || m.mask_s >= m.dwell_s) e.push('Dwell must be > 0 and longer than the mask.');
+      if (!Number.isInteger(m.cycles) || m.cycles < 1) e.push('CHIRP cycles per current level must be a positive integer.');
+      if (!(m.mask_s >= 0) || m.mask_s >= chirpDwell(m)) e.push('Mask must be nonnegative and shorter than cycles / rotation frequency.');
     } else if (m.kind === 'fixed') {
       const f = m.fixed;
-      if (f.acq === 'step') { if (!(f.n_angles >= 4)) e.push('Use at least 4 angles.'); if (!pos(f.settle_s)) e.push('Settling time must be > 0.'); }
+      if (usesVoltmeter(m) && (!Number.isInteger(f.nplc) || f.nplc<1 || f.nplc>50)) e.push('Nanovoltmeter integration must be 1..50 whole PLC.');
+      if (!['step','scan'].includes(f.acq)) e.push('Select steps or scans.');
+      if (f.acq === 'step') { if (!Number.isInteger(f.n_angles) || !(f.n_angles >= 4)) e.push('Use at least 4 whole angles.'); if (!pos(f.settle_s)) e.push('Settling time must be > 0.'); }
       else if (!pos(f.rot_hz)) e.push('Rotation frequency must be > 0.');
       if (f.excitation === 'ac' && !pos(f.carrier_hz)) e.push('Carrier frequency must be > 0.');
     } else {
@@ -85,12 +110,12 @@
   }
   /** Approximate acquisition time in seconds for one temperature point. */
   function acqSeconds(m) {
-    if (m.kind === 'chirp') return m.levels_mA.length * m.dwell_s * (m.direction === 'both' ? 2 : 1);
-    if (m.kind === 'fixed') { const f = m.fixed; return f.acq === 'scan' ? 1 / f.rot_hz : f.n_angles * (f.settle_s + 2) * (f.excitation === 'dc' && f.reverse ? 2 : 1); }
-    if (m.kind === 'rotating') return m.rotating.duration_s + (m.rotating.background ? 10 : 0);
+    if (m.kind === 'chirp') return m.levels_mA.length * chirpDwell(m) * (m.direction === 'both' ? 2 : 1);
+    if (m.kind === 'fixed') { const f = m.fixed; return f.acq === 'scan' ? 1 / f.rot_hz : f.n_angles * (f.settle_s + 2) * (f.excitation === 'delta' || (f.excitation === 'dc' && f.reverse) ? 2 : 1); }
+    if (m.kind === 'rotating') return m.rotating.excitation === 'dc' ? m.rotating.currents_mA.length * m.rotating.duration_s : m.rotating.duration_s + (m.rotating.background ? 10 : 0);
     return 0;
   }
 
-  const api = { SOURCES, VOLT, LOCKIN, ROTATOR, ENCODER, MODES, EXC, missing, availability, excitationOf, modeErrors, modeWarnings, sampleErrors, acqSeconds };
+  const api = { SOURCES, VOLT, LOCKIN, ROTATOR, ENCODER, MODES, EXC, MAX_ROT_HZ, isDelta, usesVoltmeter, chirpDwell, missing, availability, excitationOf, principle, principleErrors, modeErrors, modeWarnings, sampleErrors, acqSeconds };
   if (typeof module !== 'undefined') module.exports = api; else (root.HH = root.HH || {}, Object.assign(root.HH, api));
 })(typeof window !== 'undefined' ? window : globalThis);

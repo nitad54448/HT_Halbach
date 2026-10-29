@@ -11,31 +11,35 @@
     a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
 
-  function testProject() {
-    const p = HH.newTestProject();
-    p.tempProgram = [...HH.sweep(295, 305, 10, { rate: 5, window_s: 10 }), HH.makeStep('heater_off')];
-    return p;
-  }
-  let P = testProject(), dirty = false;
+  let P = newProject(), dirty = false;
+  let connectionCheck = null, checking = false;
+  const connectionKey = () => JSON.stringify([P.hardware, HH.principle(P.method)]);
+  const connectionsOk = () => connectionCheck?.ok && connectionCheck.key === connectionKey();
+  let configurationReleased = false, appliedMethod = null, parameterBusy = false;
+  let realJobId=null;
+  const paused = () => running && runner?.state === 'paused';
+  const configurationLocked = () => checking || (running ? !paused() : connectionsOk() && !configurationReleased);
+  const principlePath = path => ['method.fixed.excitation','method.rotating.excitation','method.fixed.acq'].includes(path);
   let ctrl = null, simDev = null, runner = null, running = false, vnow = 0;
   let trace = { t: [], T: [], sp: [] }, stepState = [], selRun = null;
 
   /* ---------------- tabs ---------------- */
-  const FLOW = [['hardware', 'Hardware'], ['mode', 'Mode'], ['sample', 'Sample'], ['temp', 'Temperature'], ['run', 'Run'], ['inspect', 'Data inspect'], ['analysis', 'Analysis']];
+  const FLOW = [['mode', 'Method'], ['hardware', 'Devices'], ['sample', 'Sample'], ['temp', 'Experiment setup'], ['run', 'Run'], ['inspect', 'Data inspect'], ['analysis', 'Analysis']];
   const UTIL = [['history', 'History'], ['log', 'Log'], ['project', 'Project & report']];
   let current = 'hardware';
   function stepOk(id) {
     switch (id) {
-      case 'hardware': return !!ctrl && Object.values(HH.availability(P.hardware)).some(a => a.ok);
-      case 'mode': return HH.modeErrors(P).length === 0;
+      case 'hardware': return connectionsOk();
+      case 'mode': return HH.principleErrors(P.method).length === 0;
       case 'sample': return HH.sampleErrors(P).length === 0;
-      case 'temp': return progErrors().length === 0;
+      case 'temp': return progErrors().length === 0 && HH.modeErrors(P).length === 0;
       default: return true;
     }
   }
   function reachable(id) {
+    if(running&&['run','temp','mode','hardware'].includes(id))return true;
     if (UTIL.some(u => u[0] === id)) return true;
-    if (P.runs.length) return true;                      // loaded/finished data: analysis tabs free
+    if (P.runs.length && ['inspect', 'analysis'].includes(id)) return true;
     const i = FLOW.findIndex(f => f[0] === id);
     return FLOW.slice(0, i).every(f => stepOk(f[0]));
   }
@@ -78,7 +82,7 @@
   function buildOptions() {
     document.querySelectorAll('select[data-opts]').forEach(sel => {
       if (sel.childElementCount) return;
-      sel.add(new Option('None / not available', ''));
+      sel.add(new Option(sel.dataset.opts === 'ENCODER' ? 'OWIS internal absolute position' : 'None / not available', ''));
       const t = HH[sel.dataset.opts]; for (const [k, v] of Object.entries(t)) sel.add(new Option(typeof v === 'string' ? v : v.name, k));
     });
   }
@@ -86,34 +90,85 @@
     buildOptions();
     document.querySelectorAll('[data-bind]').forEach(el => { const v = getPath(P, el.dataset.bind); el.value = v === null || v === undefined ? '' : String(v); });
     $('f-levels').value = P.method.levels_mA.join(', ');
+    $('f-dc-currents').value = P.method.rotating.currents_mA.join(', ');
+    const bridge=window.HHHardware.settings?.();
+    if(bridge){$('rust-url').value=bridge.baseUrl;$('rust-token').value=bridge.token;}
   }
   document.querySelectorAll('[data-bind]').forEach(el => el.addEventListener('change', () => {
     const path = el.dataset.bind; let v = el.value;
+    if(running && path==='hardware.backend') {syncForm();return;}
+    if ((path.startsWith('hardware.') || principlePath(path)) && configurationLocked()) { syncForm(); return; }
+    if (running && path.startsWith('sample.')) { syncForm(); return; }
     if ('bool' in el.dataset) v = v === 'true';
     else if ('num' in el.dataset) { if (v === '' && 'nullable' in el.dataset) v = null; else { v = Number(v); if (!isFinite(v)) { el.classList.add('bad'); return; } } }
     el.classList.remove('bad');
     const old = getPath(P, path); setPath(P, path, v);
+    if (path.startsWith('hardware.') || principlePath(path)) { connectionCheck = null; ctrl = null; simDev = null; }
     if (old !== v) { hist(P, 'config', `${path}: ${old} → ${v}`); Logger.verbose('CFG', `${path} = ${v} (was ${old})`); dirty = true; }
+    if(running && path.startsWith('method.')&&!principlePath(path)) $('parameter-status').textContent='Edited parameters have not been applied.';
     if (path.startsWith('hardware.tempController')) { if (ctrl) Logger.warn('CFG', 'Reconnect for controller settings to take effect'); }
     renderPage(current); refreshTabs();
   }));
   $('f-levels').addEventListener('change', () => {
     const arr = $('f-levels').value.split(',').map(s => s.trim()).filter(Boolean).map(Number);
-    P.method.levels_mA = arr; hist(P, 'config', 'current levels → ' + arr.join(', ')); dirty = true; renderMode(); refreshTabs();
+    P.method.levels_mA = arr; hist(P, 'config', 'current levels → ' + arr.join(', ')); dirty = true; if(running)$('parameter-status').textContent='Edited parameters have not been applied.';renderMode(); refreshTabs();
   });
+  document.querySelectorAll('[data-release-config]').forEach(button=>button.onclick=()=>{
+    if(running||checking)return;
+    configurationReleased=true;connectionCheck=null;ctrl=null;simDev=null;
+    renderPage(current);refreshTabs();
+  });
+  $('f-dc-currents').addEventListener('change', () => {
+    P.method.rotating.currents_mA = $('f-dc-currents').value.replace(/−/g, '-').split(',').map(s => s.trim()).filter(Boolean).map(Number);
+    dirty = true; hist(P, 'config', 'DC current sweep updated'); if(running)$('parameter-status').textContent='Edited parameters have not been applied.';renderMode(); refreshTabs();
+  });
+  async function loadPreset(o) {
+    if (configurationLocked()) throw new Error('Pause or stop before loading a preset.');
+    if (o.format !== 'halbach-hall-preset' || !HH.MODES[o.method?.kind]) throw new Error('Invalid measurement preset.');
+    const base = newProject();
+    for (const k of ['fixed', 'rotating']) Object.assign(base.method[k], o.method[k] || {});
+    for (const [k,v] of Object.entries(o.method)) if (!['fixed','rotating'].includes(k)) base.method[k] = v;
+    for (const k of ['tempController','magnet','source','measure']) Object.assign(base.hardware[k], o.hardware?.[k] || {});
+    for (const k of ['backend','temperature']) if (o.hardware?.[k]) base.hardware[k] = o.hardware[k];
+    if (!Array.isArray(base.method.levels_mA) || !Array.isArray(base.method.rotating.currents_mA)) throw new Error('Preset current levels must be arrays.');
+    if(base.method.fixed.excitation==='delta') {base.method.fixed.excitation='dc';base.hardware.measure.dc_mode='delta';}
+    const errors = HH.principleErrors(base.method);
+    if (errors.length) throw new Error('Invalid preset: ' + errors.join(' '));
+    P.method = base.method; P.hardware = base.hardware;
+    connectionCheck = null; ctrl = null; simDev = null; dirty = true;
+    hist(P, 'preset', 'Loaded ' + (o.name || 'preset'));
+    syncForm(); renderMode(); refreshTabs();
+  }
+  $('preset-file').onchange = async ev => {
+    const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
+    try { await loadPreset(JSON.parse(await f.text())); } catch (e) { $('mode-msg').textContent = e.message; }
+  };
+  $('save-preset').onclick = () => {
+    if (checking) return;
+    if (!P.method.kind) { $('preset-save-status').textContent='Choose a method first.'; return; }
+    const preset={format:'halbach-hall-preset',version:1,name:HH.MODES[P.method.kind].label,method:JSON.parse(JSON.stringify(P.method)),hardware:JSON.parse(JSON.stringify(P.hardware))};
+    download(P.method.kind+'.preset.json',JSON.stringify(preset,null,2),'application/json');
+    $('preset-save-status').textContent='Saved method and device settings.';
+  };
 
   /* ---------------- hardware ---------------- */
+  for(const id of ['rust-url','rust-token']) $(id).addEventListener('change',()=>{
+    try{window.HHHardware.configure({baseUrl:$('rust-url').value,token:$('rust-token').value});connectionCheck=null;ctrl=null;simDev=null;$('rust-settings-status').textContent='Local Rust connection settings updated.';renderHardware();refreshTabs();}
+    catch(e){$('rust-settings-status').textContent=e.message;}
+  });
   document.querySelectorAll('#hw-subtabs button').forEach(b => b.onclick = () => {
     document.querySelectorAll('#hw-subtabs button').forEach(x => x.classList.toggle('active', x === b));
     document.querySelectorAll('#p-hardware .subpane').forEach(x => x.classList.toggle('active', x.dataset.pane === b.dataset.sub));
   });
   function renderHardware() {
     const h = P.hardware, src = HH.SOURCES[h.source.model], lines = [];
+    $('rust-settings').hidden=h.backend!=='real';
     $('src-caps').textContent = src ? `Supports: ${[src.dc && 'DC', src.ac && 'AC'].filter(Boolean).join(' and ')}` : '';
     const name = (t, k) => t[k] ? (typeof t[k] === 'string' ? t[k] : t[k].name) : null;
     const row = (type, what, ok) => lines.push(`<tr><td>${esc(type)}</td><td>${what ? esc(what) : '<span class="muted">none</span>'}</td></tr>`);
-    row('Temperature control', ctrl ? `${HH.MODELS[h.tempController.model].name} (connected, simulated)` : `${HH.MODELS[h.tempController.model].name} (not connected)`);
-    row('Rotation controller', name(HH.ROTATOR, h.magnet.rotator)); row('Position detector', name(HH.ENCODER, h.magnet.encoder));
+    row('Temperature', h.temperature === 'off' ? 'OFF' : `${h.temperature}: ${HH.MODELS[h.tempController.model].name}`);
+    row('Rotation controller', name(HH.ROTATOR, h.magnet.rotator));
+    row('Position source', connectionsOk() ? (connectionCheck.positionSource === 'optical' ? 'Optical encoder (relative angle)' : 'OWIS controller (absolute angle)') : h.magnet.encoder ? 'Optical encoder preferred; OWIS fallback (not checked)' : 'OWIS controller (absolute angle, not checked)');
     row('Current source', name(HH.SOURCES, h.source.model)); row('Nanovoltmeter', name(HH.VOLT, h.measure.volt));
     row('Lock-in 1', name(HH.LOCKIN, h.measure.lockin1)); row('Lock-in 2', name(HH.LOCKIN, h.measure.lockin2));
     const av = HH.availability(h), ok = Object.entries(av).filter(([, a]) => a.ok).map(([k]) => HH.MODES[k].label);
@@ -121,27 +176,94 @@
     const warn = [];
     if (h.measure.lockin1 === 'SR830' && h.measure.lockin2 === 'SR830' && h.measure.lockin1_addr && h.measure.lockin1_addr === h.measure.lockin2_addr) warn.push('Two SR830s share the same address.');
     $('measure-msg').innerHTML = warn.map(x => `<div class="notice err">${esc(x)}</div>`).join('');
+    for(const k of ['lockin1','lockin2']) document.querySelector(`[data-bind="hardware.measure.${k}_addr"]`).placeholder = h.measure[k]==='AMETEK7230' ? '192.168.1.100:50000' : 'GPIB0::8::INSTR';
+    if ([h.measure.lockin1,h.measure.lockin2].includes('AMETEK7230')) $('measure-msg').innerHTML+='<p class="muted">Ametek 7230: enter the Ethernet host/IP or host:50000.</p>';
     setBadges();
+    $('connection-results').innerHTML = connectionCheck && connectionCheck.key === connectionKey()
+      ? connectionCheck.results.map(r => `<div class="notice ${r.warning ? '' : r.ok ? 'ok' : 'err'}">${esc(r.role)}: ${esc(r.message)}</div>`).join('')
+      : '<div class="notice">Connections not checked for this configuration.</div>';
+    const configErrors = HH.connectionErrors(P);
+    $('check-connections').disabled = configurationLocked() || configErrors.length > 0;
+    $('check-reference').hidden = HH.usesVoltmeter(P.method);
+    $('check-requirements').textContent = configErrors.length ? 'Configure the required devices and addresses: ' + configErrors.join('; ') : 'Required instruments configured. Ready to check connections.';
+    for (const path of ['hardware.magnet.host', 'hardware.magnet.encoder_addr', 'hardware.magnet.encoder_ppr']) document.querySelector(`[data-bind="${path}"]`).closest('.field').hidden = !h.magnet.encoder;
+    const isDC = HH.usesVoltmeter(P.method);
+    document.querySelectorAll('[data-bind^="hardware.measure."]').forEach(el => {
+      const dc = /\.(volt|volt_addr|dc_mode)$/.test(el.dataset.bind);
+      el.closest('.field').hidden = dc ? !isDC : isDC;
+    });
+    document.querySelector('[data-bind="hardware.measure.volt_addr"]').closest('.field').hidden = !isDC || HH.isDelta(P);
+    $('delta-info').hidden = !HH.isDelta(P);
+    const exc = HH.excitationOf(P.method);
+    document.querySelectorAll('[data-bind="hardware.source.model"] option').forEach(o => { o.disabled = !!o.value && (!HH.SOURCES[o.value]?.[exc === 'delta' ? 'dc' : exc] || (HH.isDelta(P) && !['K6220','K6221'].includes(o.value))); });
+    $('measure-msg').innerHTML += HH.connectionErrors(P).map(e => `<div class="notice err">${esc(e)}</div>`).join('');
+    document.querySelector('[data-pane="temp"]').hidden = h.temperature === 'off';
+    document.querySelector('#hw-subtabs [data-sub="temp"]').hidden = h.temperature === 'off';
+    if (h.temperature === 'off' && document.querySelector('[data-pane="temp"]').classList.contains('active')) document.querySelector('#hw-subtabs [data-sub="magnet"]').click();
   }
+  $('check-connections').onclick = async () => {
+    if (configurationLocked() || HH.connectionErrors(P).length) return;
+    checking = true; connectionCheck = null;
+    const key = connectionKey(), snapshot = JSON.parse(JSON.stringify(P));
+    renderHardware(); refreshTabs();
+    try {
+      const result = await HH.checkDevices(snapshot, window.HHHardware);
+      if (key !== connectionKey()) return;
+      connectionCheck = Object.assign(result, { key });
+      if(result.ok) configurationReleased=false;
+      if (result.ok && result.simulated && P.hardware.temperature !== 'off') await connectController();
+      hist(P, 'hardware', result.ok ? 'All selected device checks passed' : 'Device connection check failed', result);
+    } finally { checking = false; renderHardware(); refreshTabs(); }
+  };
+  $('check-reference').onclick = async () => {
+    if (running || checking) return;
+    const ds = HH.selectedDevices(P).filter(d => d.role.startsWith('lockin'));
+    if (!ds.length || HH.connectionErrors(P).length) { $('reference-result').textContent = 'Configure a lock-in and its address first.'; return; }
+    $('check-reference').disabled = true;
+    $('reference-result').textContent = 'Waiting for TTL reference lock…';
+    try {
+      for (const d of ds) {
+        const r = P.hardware.backend === 'simulation' ? { frequencyHz: P.method.kind === 'rotating' && P.method.rotating.excitation === 'dc' ? P.method.rotating.rot_hz : P.method.carrier_hz } : await window.HHHardware.waitForReference(d);
+        $('reference-result').textContent = (P.hardware.backend === 'simulation' ? 'SIMULATED: ' : '') + d.model + ' locked at ' + r.frequencyHz + ' Hz';
+      }
+    } catch (e) { $('reference-result').textContent = e.message; Logger.error('REF', e.message); }
+    finally { $('check-reference').disabled = false; }
+  };
   function setBadges() {
-    const m = $('b-ls'); m.textContent = ctrl ? `Temp: ${P.hardware.tempController.model} connected` : 'Temp: not connected'; m.className = 'badge ' + (ctrl ? 'ok' : '');
+    $('b-mode').textContent = P.hardware.backend === 'simulation' ? 'SIMULATION: synthetic data' : 'Real instruments';
+    const m = $('b-ls'); m.textContent = P.hardware.temperature === 'off' ? 'Temp: OFF' : P.hardware.backend === 'real' && connectionsOk() ? 'Temp: verified ('+P.hardware.temperature+')' : ctrl ? `Temp: ${P.hardware.temperature} (simulated)` : 'Temp: not connected'; m.className = 'badge ' + (ctrl || connectionsOk() ? 'ok' : '');
     const r = $('b-run'); r.textContent = running ? (runner?.state === 'paused' ? 'Paused' : 'Running') : 'Idle'; r.className = 'badge ' + (running ? 'run' : '');
-    $('ls-connect').disabled = !!ctrl || running; $('ls-disconnect').disabled = !ctrl || running; $('ls-heateroff').disabled = !ctrl;
-    document.querySelectorAll('[data-bind],#f-levels,#p-temp .toolbar input,#p-temp .toolbar select,#p-temp .toolbar button').forEach(el => el.disabled = running);
+    $('ls-connect').disabled = true; $('ls-disconnect').disabled = configurationLocked() || !ctrl; $('ls-heateroff').disabled = !ctrl || P.hardware.temperature !== 'control';
+    document.querySelectorAll('[data-bind]').forEach(el => el.disabled = el.closest('#p-mode,#p-hardware') ? configurationLocked() : el.dataset.bind.startsWith('sample.') ? running || checking : checking);
+    if(running) document.querySelector('[data-bind="hardware.backend"]').disabled=true;
+    document.querySelectorAll('#f-levels,#f-dc-currents').forEach(el=>el.disabled=checking);
+    document.querySelectorAll('#p-temp .toolbar input,#p-temp .toolbar select,#p-temp .toolbar button').forEach(el=>el.disabled=running||checking);
+    $('save-preset').disabled=checking; $('preset-file').disabled=configurationLocked();
+    $('rust-url').disabled=configurationLocked();$('rust-token').disabled=configurationLocked();
+    document.querySelectorAll('#mode-cards button').forEach(button=>button.disabled=configurationLocked());
+    document.querySelectorAll('[data-step-index]').forEach(input=>input.disabled=running&&Number(input.dataset.stepIndex)<=(runner?.index??stepState.findIndex(x=>x==='start')));
+    document.querySelectorAll('[data-release-config]').forEach(button=>{button.hidden=!connectionsOk()||configurationReleased;button.disabled=running||checking;});
+    const lockMessage=checking?'Checking connections…':configurationLocked()?'Validated configuration is read only. Pause or stop to change the method or devices.':'Choose the method and devices, then check connections.';
+    $('method-lock').textContent=lockMessage;$('device-lock').textContent=lockMessage;
+    $('apply-parameters').disabled=checking||parameterBusy||HH.modeErrors(P).length>0||progErrors().length>0;
+    $('r-pause').disabled=!running||runner?.state==='pausing'||(paused()&&(!connectionsOk()||HH.modeErrors(P).length>0));
+    $('r-speed').disabled = running || P.hardware.backend === 'real';
   }
   async function connectController() {
+    if (P.hardware.backend !== 'simulation' || P.hardware.temperature === 'off') return;
     const c = P.hardware.tempController;
     try {
       simDev = new HH.SimLakeShore(c.model, 295, 7);
       const d = new HH.LakeShore(c.model, simDev, { input: c.input, loop: c.loop });
       const id = await d.identify(); ctrl = d;
+      if (P.hardware.temperature === 'read') ctrl = { readK: () => d.readK(), getSetpoint: async () => null, heaterOff: async () => {} };
       $('ls-info').textContent = `${id.manufacturer} ${id.model}, s/n ${id.serial}, fw ${id.firmware} — SIMULATED at ${c.address}`;
       hist(P, 'hardware', `Connected ${c.model} (simulated) input ${c.input}, loop ${c.loop}`);
     } catch (e) { Logger.error('HW', 'Connect failed: ' + e.message); $('ls-info').textContent = 'Connect failed: ' + e.message; }
     setBadges(); refreshTabs(); renderHardware();
   }
   $('ls-connect').onclick = connectController;
-  $('ls-disconnect').onclick = () => { ctrl = null; simDev = null; Logger.info('HW', 'Disconnected'); hist(P, 'hardware', 'Disconnected'); $('ls-info').textContent = ''; setBadges(); refreshTabs(); };
+  $('ls-disconnect').onclick = () => { connectionCheck = null; ctrl = null; simDev = null; Logger.info('HW', 'Disconnected'); hist(P, 'hardware', 'Disconnected'); $('ls-info').textContent = ''; setBadges(); refreshTabs(); };
   $('ls-heateroff').onclick = async () => { try { await ctrl.heaterOff(); hist(P, 'hardware', 'Heater switched off by user'); } catch (e) { Logger.error('HW', e.message); } };
 
   /* ---------------- mode / sample ---------------- */
@@ -149,29 +271,38 @@
   function renderMode() {
     const av = HH.availability(P.hardware), m = P.method, box = $('mode-cards'); box.replaceChildren();
     for (const [k, md] of Object.entries(HH.MODES)) {
-      const a = av[k], b = document.createElement('button'); b.className = 'mode-card' + (m.kind === k ? ' sel' : ''); b.disabled = !a.ok || running;
+      const a = av[k], b = document.createElement('button'); b.className = 'mode-card' + (m.kind === k ? ' sel' : ''); b.disabled = configurationLocked();
       const why = a.ok ? '' : md.variants.map(v => `${HH.EXC[v]}: needs ${a.variants[v].missing.join(', ')}`).join(' · ');
-      b.innerHTML = `<b>${esc(md.label)}</b><small>${esc(md.ref)}</small><small>${esc(md.text)}</small>` + (a.ok ? `<small>Available: ${md.variants.filter(v => a.variants[v].ok).map(v => HH.EXC[v]).join(', ')}</small>` : `<small class="why">Unavailable. ${esc(why)}</small>`);
+      b.innerHTML = `<b>${esc(md.label)}</b><small>${esc(md.ref)}</small><small>${esc(md.text)}</small>`;
       b.onclick = () => {
+        if(configurationLocked()) return;
         const old = m.kind; m.kind = k; const ex = m[k] && m[k].excitation;
-        if (ex && !a.variants[ex].ok) m[k].excitation = md.variants.find(v => a.variants[v].ok);
+        connectionCheck = null; ctrl = null; simDev = null;
         hist(P, 'config', `mode: ${old || 'none'} → ${k}`); dirty = true; syncForm(); renderMode(); refreshTabs();
       };
       box.append(b);
     }
+    const presetCard=document.createElement('button');presetCard.className='mode-card';presetCard.id='preset-card';presetCard.disabled=configurationLocked();
+    presetCard.innerHTML='<b>Load preset</b><small>Open a JSON file containing the method and devices.</small>';
+    presetCard.onclick=()=> $('preset-file').click();box.append(presetCard);
     document.querySelectorAll('.mode-panel').forEach(p => p.hidden = p.id !== 'mp-' + m.kind);
+    for(const k of ['fixed','rotating','chirp']) $('principle-'+k).hidden=m.kind!==k;
+    document.querySelector('[data-bind="method.tc_ms"]').closest('.card').hidden=!m.kind||HH.usesVoltmeter(m);
     // excitation selects: offer only available variants
     document.querySelectorAll('select[data-excsel]').forEach(sel => {
       const k = sel.id.replace('x-', ''); sel.replaceChildren();
-      for (const v of HH.MODES[k].variants) { const o = new Option(k === 'rotating' ? (v === 'dc' ? 'DC current / field-frequency lock-in' : 'AC current / sideband lock-in') : (v === 'dc' ? 'DC current / nanovoltmeter' : 'AC current / lock-in'), v); o.disabled = !av[k].variants[v].ok; sel.add(o); }
+      for (const v of HH.MODES[k].variants) sel.add(new Option(HH.EXC[v], v));
       sel.value = m[k].excitation;
     });
     const f = m.fixed, show = (el, on) => { el.hidden = !on; };
-    document.querySelectorAll('#mp-fixed [data-when]').forEach(el => show(el, { ac: f.excitation === 'ac', dc: f.excitation === 'dc', step: f.acq === 'step', scan: f.acq === 'scan' }[el.dataset.when]));
-    document.querySelectorAll('#mp-rotating [data-when]').forEach(el => show(el, m.rotating.excitation === 'ac'));
-    const e = m.kind ? HH.modeErrors(P) : [], w = m.kind ? HH.modeWarnings(P) : [];
+    document.querySelectorAll('#mp-fixed [data-when]').forEach(el => show(el, { ac: f.excitation === 'ac', dc: f.excitation === 'dc' && !HH.isDelta(P), volt: HH.usesVoltmeter(m), step: f.acq === 'step', scan: f.acq === 'scan' }[el.dataset.when]));
+    document.querySelectorAll('#mp-rotating [data-when]').forEach(el => show(el, el.dataset.when === m.rotating.excitation));
+    const parameterErrors=m.kind?HH.modeErrors(P):[];
+    $('experiment-msg').innerHTML=parameterErrors.map(x=>`<div class="notice err">${esc(x)}</div>`).join('');
+    const e = HH.principleErrors(m), w = [];
     $('mode-msg').innerHTML = (m.kind ? '' : '<div class="notice">Select a mode.</div>') + e.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + w.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
-      (m.kind && !e.length ? `<div class="notice ok">Acquisition time per temperature point ≈ ${fmtDur(HH.acqSeconds(m))}.</div>` : '');
+      (m.kind && !e.length ? '<div class="notice ok">Select compatible devices next. Set numerical parameters in Experiment setup.</div>' : '');
+    setBadges();
   }
   function renderSample() {
     const w = []; if (P.sample.tilt_deg !== 0) w.push('Non-zero tilt: guide recommends validating zero-tilt ordinary Hall first.');
@@ -180,9 +311,17 @@
 
   /* ---------------- temperature program ---------------- */
   const tl = () => P.hardware.tempController;
-  function progErrors() { return HH.validateProgram(P.tempProgram, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin }); }
+  function progErrors() {
+    const e = HH.validateProgram(P.tempProgram, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
+    if (P.hardware.temperature !== 'control' && P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type))) e.push('Temperature OFF/read only permits measurement and soak steps. Remove temperature control steps or enable control.');
+    return e;
+  }
   function renderProgram() {
+    renderMode();
     const sel = $('add-type'); if (!sel.childElementCount) for (const [k, v] of Object.entries(HH.STEP_TYPES)) sel.add(new Option(v.label, k));
+    for (const o of sel.options) o.disabled = P.hardware.temperature !== 'control' && ['goto', 'heater_off'].includes(o.value);
+    if (sel.selectedOptions[0]?.disabled) sel.value = 'measure';
+    $('add-sweep').disabled = running || P.hardware.temperature !== 'control';
     const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'tol', 'mean_tol', 'window_s', 'timeout_s'], soak: ['seconds'], measure: ['label'], heater_off: [] };
     const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', tol: 'Tol ±K', mean_tol: 'Mean |?T| (K)', window_s: 'Window (s)', timeout_s: 'Timeout (s)', seconds: 'Seconds', label: 'Label' };
     t.innerHTML = '<tr><th>#</th><th>Step</th><th>Parameters</th><th></th></tr>';
@@ -194,7 +333,7 @@
         let inp;
         if (k === 'range') { inp = document.createElement('select'); ['low', 'medium', 'high'].forEach(r => inp.add(new Option(r, r))); }
         else { inp = document.createElement('input'); inp.type = k === 'label' ? 'text' : 'number'; inp.step = 'any'; inp.style.width = k === 'label' ? '120px' : '90px'; }
-        inp.value = k === 'mean_tol' && s[k] === undefined ? s.tol : s[k]; inp.disabled = running;
+        inp.value = k === 'mean_tol' && s[k] === undefined ? s.tol : s[k]; inp.dataset.stepIndex=i; inp.disabled = running && i <= (runner?.index??stepState.findIndex(x=>x==='start'));
         inp.onchange = () => { const old = s[k]; s[k] = k === 'label' || k === 'range' ? inp.value : Number(inp.value); hist(P, 'program', `step ${i + 1} ${k}: ${old} → ${s[k]}`); dirty = true; renderProgram(); refreshTabs(); };
         w.append(inp); c.append(w);
       });
@@ -208,6 +347,21 @@
       errs.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + warn.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
       (P.tempProgram.length && !errs.length ? `<div class="notice ok">Valid. Estimated duration ≈ ${fmtDur(est + meas * per)} (thermal ${fmtDur(est)} + ${meas} measurements × ${per} s), assuming start at 295 K.</div>` : '');
   }
+  $('apply-parameters').onclick=async()=>{
+    if(HH.modeErrors(P).length||progErrors().length||parameterBusy)return;
+    parameterBusy=true;setBadges();
+    try {
+      if(running&&P.hardware.backend==='real') {
+        if(!realJobId)throw Error('Wait for the program to start.');
+        await window.HHHardware.updateProgram(realJobId,P);
+      }
+      appliedMethod=JSON.parse(JSON.stringify(P.method));
+      if(running&&P.hardware.backend==='simulation') runner.steps=JSON.parse(JSON.stringify(P.tempProgram));
+      $('parameter-status').textContent=running?'Accepted for the next measurement. Current data keep their original settings.':'Parameters ready.';
+      hist(P,'config','Experiment parameters applied');
+    }catch(e){$('parameter-status').textContent='Not applied: '+e.message;}
+    finally{parameterBusy=false;setBadges();}
+  };
   function fmtDur(s) { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`; }
   $('add-step').onclick = () => { const ty = $('add-type').value; P.tempProgram.push(HH.makeStep(ty)); hist(P, 'program', 'added step ' + ty); dirty = true; renderProgram(); refreshTabs(); };
   $('add-sweep').onclick = () => {
@@ -230,11 +384,13 @@
   /* ---------------- run ---------------- */
   function renderRun() {
     const n = $('run-notice'), why = [];
-    if (!ctrl) why.push('Temperature controller not connected.');
+    if (!connectionsOk()) why.push('Check all selected device connections before running.');
+    if (P.hardware.backend === 'real') why.push(...realRunErrors());
+    if (P.hardware.backend === 'simulation' && P.hardware.temperature !== 'off' && !ctrl) why.push('Temperature device not connected.');
     methodErrors().forEach(x => why.push(x)); progErrors().forEach(x => why.push(x));
-    n.innerHTML = why.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + '<div class="notice">Simulated backend: all data produced here is synthetic and tagged as such in saved projects.</div>';
+    n.innerHTML = why.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + (P.hardware.backend === 'simulation' ? '<div class="notice">Simulation: synthetic data, tagged in saved projects.</div>' : '<div class="notice">Real program: Start enables the configured current source and moves the referenced OWIS axis. Abort stops motion, disables current and turns off temperature control. Timing and electrical phase require bench calibration.</div>');
     $('r-start').disabled = running || why.length > 0;
-    $('r-pause').disabled = !running; $('r-abort').disabled = !running;
+    $('r-pause').disabled = !running || runner?.state==='pausing' || (paused() && (!connectionsOk() || HH.modeErrors(P).length>0)); $('r-abort').disabled = !running;
     $('r-pause').textContent = runner?.state === 'paused' ? 'Resume' : 'Pause';
     const t = $('run-steps'); t.innerHTML = '<tr><th>#</th><th>Step</th><th>Detail</th><th>State</th></tr>';
     P.tempProgram.forEach((s, i) => { const tr = t.insertRow(); tr.className = stepState[i] === 'start' ? 'cur' : stepState[i] === 'done' ? 'donest' : ''; tr.insertCell().textContent = i + 1; tr.insertCell().textContent = s.type; tr.insertCell().textContent = s.type === 'goto' ? `${s.T} K @ ${s.rate} K/min` : s.type === 'soak' ? s.seconds + ' s' : s.label || ''; tr.insertCell().textContent = stepState[i] === 'start' ? 'active' : stepState[i] === 'done' ? 'done' : ''; });
@@ -245,9 +401,62 @@
     $('r-kpis').innerHTML = [['Temperature', fx(s.T, 4) + ' K'], ['Setpoint', fx(s.setpoint, 4) + ' K'], ['Heater', fx(s.heater, 3) + ' %'], ['Runs saved', P.runs.length], ['Elapsed', fmtDur(vnow)]].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('');
   }
   function setStatus(t) { $('r-status').textContent = t; }
+  function realRunErrors() {
+    const h=P.hardware,e=[];
+    if (location.protocol==='file:') e.push('Open the UI through Live Server or GitHub Pages and start the local Rust service.');
+    if (!(h.magnet.counts_per_turn>0) || !(h.magnet.velocity_scale>0)) e.push('Configure calibrated OWIS counts per revolution and velocity conversion on Devices.');
+    if (!['K6220','K6221'].includes(h.source.model)) e.push('Real acquisition currently supports Keithley 6220/6221 sources.');
+    if (!HH.usesVoltmeter(P.method) && !['SR830','AMETEK7230'].includes(h.measure.lockin1)) e.push('Select SR830 or Ametek 7230 as Lock-in 1 for real acquisition.');
+    if (h.measure.lockin2) e.push('Real acquisition currently records one lock-in; deselect Lock-in 2.');
+    return e;
+  }
+  async function startRealProgram() {
+    if (realRunErrors().length) {renderRun();return;}
+    let jobId=null,cursor=0,abortRequested=false;
+    running=true; stepState=[];vnow=0;trace={t:[],T:[],sp:[]};const realStarted=Date.now();
+    appliedMethod=JSON.parse(JSON.stringify(P.method));configurationReleased=false;
+    runner={state:'running',abort:()=>{abortRequested=true;if(jobId) window.HHHardware.abortProgram(jobId).catch(e=>Logger.error('HW',e.message));},pause:async()=>{runner.state='pausing';renderRun();await window.HHHardware.pauseProgram(jobId);},resume:async()=>{await window.HHHardware.resumeProgram(jobId,P);runner.state='running';configurationReleased=false;}};
+    renderRun();
+    try {
+      jobId=(await window.HHHardware.startProgram(P)).id;
+      realJobId=jobId;
+      if (abortRequested) await window.HHHardware.abortProgram(jobId);
+      hist(P,'run','Real instrument program started');
+      while (true) {
+        const status=await window.HHHardware.programStatus(jobId,cursor);
+        runner.state=status.state;
+        if(status.state==='paused')configurationReleased=true;
+        for (const data of status.runs) {
+          const run=Object.assign({id:'run-'+String(P.runs.length+1).padStart(3,'0'),started:new Date().toISOString(),sample:JSON.parse(JSON.stringify(P.sample)),method:JSON.parse(JSON.stringify(P.method)),excluded:[]},data);
+          if (run.incomplete) {run.fitError='Incomplete acquisition: retained raw samples.';run.fit=null;run.derived=null;} else fitRun(run);
+          P.runs.push(run);selRun=run.id;dirty=true;hist(P,'run',run.id+' recorded from real instruments');
+        }
+        cursor=status.count; P.simulated=P.runs.some(r=>r.simulated);
+        stepState=P.tempProgram.map((_,i)=>i<status.step?'done':i===status.step?'start':'');
+        $('r-prog').style.width=((status.step+(status.state==='finished'?1:0))/P.tempProgram.length*100)+'%';
+        vnow=(Date.now()-realStarted)/1000;
+        if (Number.isFinite(status.temperatureK)) {trace.t.push(vnow);trace.T.push(status.temperatureK);trace.sp.push(status.setpointK??NaN);}
+        setStatus(status.message+(status.cleanupErrors?.length?' — '+status.cleanupErrors.join('; '):''));updateKpis({T:status.temperatureK,setpoint:status.setpointK,heater:null});renderRun();
+        if (['finished','error','aborted'].includes(status.state)) {
+          if (status.state==='finished') stepState=stepState.map(()=> 'done');
+          hist(P,'run','Real program '+status.state+': '+status.message); break;
+        }
+        await sleepReal(500);
+      }
+    } catch(e) {
+      if(jobId) try {await window.HHHardware.abortProgram(jobId);} catch (_) {}
+      setStatus('Hardware error: '+e.message);Logger.error('HW',e.message);hist(P,'run','Real program error: '+e.message);
+    } finally {running=false;runner=null;realJobId=null;configurationReleased=true;renderRun();refreshTabs();}
+  }
 
   $('r-start').onclick = async () => {
     if (running) return;
+    if (!connectionsOk() || methodErrors().length || progErrors().length) return;
+    if (P.hardware.backend === 'real') return startRealProgram();
+    if (P.hardware.temperature === 'off') {
+      simDev = { advance() {} };
+      ctrl = { readK: async () => null, getSetpoint: async () => null, heaterOff: async () => {} };
+    }
     if (!ctrl || progErrors().length || methodErrors().length) { renderRun(); return; }
     if (P.runs.length && !confirm('Runs already exist in this project. New runs will be appended. Continue?')) return;
     $('r-stability').textContent = '';
@@ -260,33 +469,54 @@
       onStep: (i, s, st) => { stepState[i] = st; $('r-prog').style.width = ((st === 'done' ? i + 1 : i) / total * 100) + '%'; setStatus(`Step ${i + 1}/${total}: ${HH.STEP_TYPES[s.type].label}`); hist(P, 'run', `Step ${i + 1} ${st}: ${s.type}`); renderRun(); },
       measure: ctx => measure(ctx, speed),
     };
-    runner = new HH.ProgramRunner(ctrl, P.tempProgram, env, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
+    runner = new HH.ProgramRunner(ctrl, JSON.parse(JSON.stringify(P.tempProgram)), env, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
+    appliedMethod=JSON.parse(JSON.stringify(P.method));configurationReleased=false;
     running = true; hist(P, 'run', `Program started (${total} steps, ${P.runs.length} existing runs)`); renderRun();
     try { await runner.run(); setStatus('Finished'); hist(P, 'run', 'Program finished'); }
     catch (e) { setStatus((e.aborted ? 'Aborted: ' : 'Error: ') + e.message); hist(P, 'run', (e.aborted ? 'Aborted: ' : 'ERROR: ') + e.message + ' — heater switched off'); }
-    running = false; runner = null; dirty = true; renderRun(); refreshTabs();
+    running = false; runner = null; configurationReleased=true;dirty = true; renderRun(); refreshTabs();
     if (P.runs.length) { selRun = P.runs[P.runs.length - 1].id; }
   };
-  $('r-pause').onclick = () => { if (!runner) return; if (runner.state === 'paused') runner.resume(); else runner.pause(); hist(P, 'run', runner.state === 'paused' ? 'resume' : 'pause'); setTimeout(renderRun, 50); };
+  $('r-pause').onclick = async () => {
+    if(!runner)return;
+    try {
+      if(paused()) {
+        if(!connectionsOk()||HH.modeErrors(P).length)return;
+        if(P.hardware.backend==='simulation'){
+          if(P.hardware.temperature==='off'&&!ctrl){simDev={advance(){}};ctrl={readK:async()=>null,getSetpoint:async()=>null,heaterOff:async()=>{}};}
+          runner.c=ctrl;appliedMethod=JSON.parse(JSON.stringify(P.method));
+        }
+        await runner.resume();configurationReleased=false;
+      } else {
+        await runner.pause();
+        if(P.hardware.backend==='simulation') {runner.state='paused';configurationReleased=true;}
+      }
+      hist(P,'run',paused()?'Program paused':'Program resumed');renderRun();refreshTabs();
+    }catch(e){setStatus(e.message);renderRun();}
+  };
   $('r-abort').onclick = () => { if (runner && confirm('Abort the program? The heater will be switched off.')) runner.abort(); };
 
   async function measure(ctx, speed) {
     const id = 'run-' + String(P.runs.length + 1).padStart(3, '0');
     Logger.info('MEAS', `${id}: ${P.method.kind} mode at ${ctx.T_set} K`);
     const T = await ctrl.readK();
-    const res = await HH.acquire(P, ctx, () => T);
+    const snapshot=JSON.parse(JSON.stringify(P));snapshot.method=JSON.parse(JSON.stringify(appliedMethod||P.method));
+    const res = await HH.acquire(snapshot, ctx, () => T === null ? 295 : T);
+    if (P.hardware.temperature === 'off') { res.T_mean = null; res.samples.T.fill(null); }
     const dur = res.samples.t[res.samples.t.length - 1]; vnow += dur; simDev.advance(dur);
     if (speed > 0) await sleepReal(Math.min(dur * 1000 / speed, 5000));
-    const run = { id, label: ctx.step.label || '', T_set: ctx.T_set, T_mean: res.T_mean, started: new Date().toISOString(), simulated: true, rsq_ohm: res.rsq_ohm, sample: JSON.parse(JSON.stringify(P.sample)), method: JSON.parse(JSON.stringify(P.method)), samples: res.samples, excluded: [] };
+    const run = { id, label: ctx.step.label || '', positionSource: connectionCheck?.positionSource||'owis', T_set: ctx.T_set, T_mean: res.T_mean, started: new Date().toISOString(), simulated: true, rsq_ohm: res.rsq_ohm, sample:snapshot.sample, method:snapshot.method, samples: res.samples, excluded: [] };
     fitRun(run); P.runs.push(run);
-    hist(P, 'run', `${id} saved: T=${run.T_mean.toFixed(3)} K, n_s=${fx(run.derived?.ns)} m⁻²`, { run: id });
+    hist(P, 'run', `${id} saved: T=${fx(run.T_mean)} K, n_s=${fx(run.derived?.ns)} m⁻²`, { run: id });
     Logger.info('MEAS', `${id} done: A1=${fx(run.fit?.A1)} Ω`);
     selRun = id; if (current === 'inspect' && $('i-live').checked) renderInspect();
   }
   function fitRun(run) {
     try {
-      run.fit = HH.fitHarmonics(run.samples);
+      if (run.incomplete) throw new Error('Incomplete acquisition: retained raw samples without fitting.');
+      run.fit = run.detectionKind === 'field-lockin' ? HH.fitFieldLockin(run.samples,run.method.rotating.excitation) : run.method?.kind === 'rotating' && run.method.rotating.excitation === 'dc' ? HH.fitCurrentSweep(run.samples) : HH.fitHarmonics(run.samples);
       run.derived = HH.derive(run.fit, Object.assign({}, run.sample, { rsq_ohm: run.rsq_ohm ?? run.sample.rsq_ohm }));
+      if (run.fit.warnings) run.derived.warnings.push(...run.fit.warnings);
       run.fitError = null;
     } catch (e) { run.fit = null; run.derived = null; run.fitError = e.message; Logger.error('FIT', run.id + ': ' + e.message); }
   }
@@ -300,9 +530,18 @@
     sel.value = selRun || ''; const r = runById(selRun);
     if (!r) { $('i-kpis').innerHTML = '<div class="notice">No runs yet.</div>'; ['c-xth', 'c-xt', 'c-res'].forEach(c => HH.plot($(c), [])); $('i-table').innerHTML = ''; return; }
     const s = r.samples, f = r.fit, d = r.derived;
+    $('i-slope-info').textContent = '';
+    for (const id of ['c-xth','c-res']) $(id).closest('.card').hidden = r.detectionKind === 'field-lockin';
+    $('i-slope-card').hidden = !f?.currentSlope;
+    if (f?.currentSlope) {
+      const slope = f.currentSlope, x = slope.points.map(p => p.I), y = slope.points.map(p => p.voltage);
+      HH.plot($('c-current-slope'), [{x, y, color:'#66d6ce', kind:'points'}, {x, y:x.map(I=>slope.intercept+slope.slope*I), color:'#e3b96e'}], {xlabel:'DC current (A)', ylabel:'Signed Hall voltage (V)'});
+      $('i-slope-info').textContent = `Slope ${fx(slope.slope)} V/A; fitted intercept ${fx(slope.intercept)} V. ${slope.points.length} distinct currents; no separate zero-current background subtraction.`;
+      if (r.detectionKind==='field-lockin') $('i-slope-info').textContent += ' RMS lock-in output normalized to Hall amplitude; verify reference phase and gain.';
+    }
     $('i-kpis').innerHTML = [['T mean', fx(r.T_mean, 5) + ' K'], ['Samples (valid)', `${s.t.length} (${s.valid.reduce((a, b) => a + b, 0)})`], ['A1', f ? fx(f.A1) + ' Ω' : '—'], ['D1/A1', f ? fx(f.D1 / f.A1, 3) : '—'], ['A2', f ? fx(f.A2) + ' Ω' : '—'], ['Fit rms', f ? fx(f.rms) + ' V' : '—'], ['Condition', f ? fx(f.cond, 3) : '—'], ['Carrier', d?.carrier || '—']].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('') + (r.fitError ? `<div class="notice err">${esc(r.fitError)}</div>` : '') + (d ? d.warnings.map(w => `<div class="notice">${esc(w)}</div>`).join('') : '') + (r.simulated ? '<div class="notice">Simulated data.</div>' : '');
     // choose one current level for X vs angle readability: all valid points, X/I normalised to ohm
-    const vi = [], mi = []; s.theta.forEach((th, i) => (s.valid[i] ? vi : mi).push(i));
+    const vi = [], mi = []; s.theta.forEach((th, i) => { if (s.I[i] !== 0) (s.valid[i] ? vi : mi).push(i); });
     const wrap = th => { const w = ((th % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI); return w * 180 / Math.PI; };
     const R = i => s.X[i] / s.I[i];
     const model = i => { if (!f) return NaN; const th = s.theta[i]; return f.A1 * Math.cos(th) + f.D1 * Math.sin(th) + f.A2 * Math.sin(2 * th) + f.B2c * Math.cos(2 * th) + (isFinite(f.b0) ? f.b0 : 0) + f.o0 / s.I[i]; };
@@ -311,7 +550,7 @@
     HH.plot($('c-res'), [{ x: vi.map(i => wrap(s.theta[i])), y: vi.map(i => R(i) - model(i)), color: '#80aaf9', kind: 'points' }], { xlabel: 'field angle (deg)', ylabel: 'residual (Ω)' });
     const t = $('i-table'); t.innerHTML = '<tr><th>t (s)</th><th>θ (deg)</th><th>X (V)</th><th>Y (V)</th><th>I (A)</th><th>T (K)</th><th>valid</th></tr>';
     const stride = Math.max(1, Math.floor(s.t.length / 300));
-    for (let i = 0; i < s.t.length; i += stride) { const tr = t.insertRow(); [s.t[i].toFixed(2), (s.theta[i] * 180 / Math.PI).toFixed(1), fx(s.X[i], 4), fx(s.Y[i], 3), fx(s.I[i], 4), s.T[i].toFixed(4), s.valid[i]].forEach(v => tr.insertCell().textContent = v); }
+    for (let i = 0; i < s.t.length; i += stride) { const tr = t.insertRow(); [s.t[i].toFixed(2), (s.theta[i] * 180 / Math.PI).toFixed(1), fx(s.X[i], 4), fx(s.Y[i], 3), fx(s.I[i], 4), fx(s.T[i], 4), s.valid[i]].forEach(v => tr.insertCell().textContent = v); }
   }
   $('i-run').onchange = () => { selRun = $('i-run').value; $('i-live').checked = false; renderInspect(); };
   $('i-live').onchange = renderInspect;
@@ -331,7 +570,7 @@
   function renderAnalysis() {
     const t = $('a-table'); t.innerHTML = '<tr>' + COLS.map(c => `<th>${esc(c[1])}</th>`).join('') + '</tr>';
     P.runs.forEach(r => { const tr = t.insertRow(); COLS.forEach(c => tr.insertCell().textContent = c[2](r)); });
-    const ok = P.runs.filter(r => r.derived), T = ok.map(r => r.T_mean);
+    const ok = P.runs.filter(r => r.derived && Number.isFinite(r.T_mean)), T = ok.map(r => r.T_mean);
     HH.plot($('c-ns'), [{ x: T, y: ok.map(r => r.derived.ns / 1e4), color: '#66d6ce', kind: 'points' }, { x: T, y: ok.map(r => r.derived.ns / 1e4), color: '#66d6ce' }], { xlabel: 'T (K)', ylabel: 'n_s (cm⁻²)' });
     HH.plot($('c-mu'), [{ x: T, y: ok.map(r => r.derived.mu * 1e4), color: '#80aaf9' }, { x: T, y: ok.map(r => r.derived.mu * 1e4), color: '#80aaf9', kind: 'points' }], { xlabel: 'T (K)', ylabel: 'µ (cm²/Vs)' });
     HH.plot($('c-rh'), [{ x: T, y: ok.map(r => r.derived.RH * 1e6), color: '#e3b96e' }, { x: T, y: ok.map(r => r.derived.RH * 1e6), color: '#e3b96e', kind: 'points' }], { xlabel: 'T (K)', ylabel: 'R_H (cm³/C)' });
@@ -392,16 +631,18 @@
       const base = newProject(), np = Object.assign(base, o);
       np.sample = Object.assign(base.sample, o.sample); np.method = Object.assign(newProject().method, o.method); for (const k of ['fixed', 'rotating']) np.method[k] = Object.assign(newProject().method[k], (o.method || {})[k]); if (!o.method || !o.method.kind) np.method.kind = 'chirp';
       np.hardware = Object.assign(newProject().hardware, o.hardware); for (const k of ['tempController', 'magnet', 'source', 'measure']) np.hardware[k] = Object.assign(newProject().hardware[k], (o.hardware || {})[k]);
+      if (np.method.fixed.excitation === 'delta') {np.method.fixed.excitation='dc';np.hardware.measure.dc_mode='delta';}
+      if (!o.method?.cycles) np.method.cycles = Math.max(1, Math.ceil(np.method.dwell_s * np.method.rot_hz));
       for (const r of np.runs) { const s = r.samples, n = s && s.t ? s.t.length : -1; if (n < 1 || ['theta', 'X', 'Y', 'I', 'T', 'valid'].some(k => !Array.isArray(s[k]) || s[k].length !== n)) throw new Error(`Run ${r.id}: inconsistent sample arrays.`); }
       if (dirty && !confirm('Unsaved changes will be lost. Load anyway?')) return;
       P = np; ctrl = null; simDev = null; dirty = false; selRun = P.runs.length ? P.runs[0].id : null;
       np.runs.forEach(r => { if (!r.fit && !r.fitError) fitRun(r); });
       if (Array.isArray(o.log)) { Logger.entries = o.log.slice(-Logger.max); Logger.seq = Logger.entries.reduce((m, e) => Math.max(m, e.n || 0), 0); }
       hist(P, 'project', `loaded ${f.name} (${P.runs.length} runs)`); Logger.info('IO', `Loaded project ${f.name}: ${P.runs.length} runs`);
-      syncForm(); await connectController(); msg(`Loaded ${f.name}: ${P.runs.length} runs. Test controller connected; new measurements are simulated.`, 'ok'); show(P.runs.length ? 'analysis' : 'project');
+      connectionCheck = null; syncForm(); setBadges(); msg(`Loaded ${f.name}: ${P.runs.length} runs. Check device connections before running.`, 'ok'); show(P.runs.length ? 'analysis' : 'project');
     } catch (e) { Logger.error('IO', 'Load failed: ' + e.message); msg('Load failed: ' + e.message, 'err'); }
   };
-  $('pr-new').onclick = async () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = testProject(); ctrl = null; simDev = null; dirty = false; selRun = null; syncForm(); setBadges(); hist(P, 'project', 'new test project'); await connectController(); show('hardware'); };
+  $('pr-new').onclick = async () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = newProject(); connectionCheck = null; ctrl = null; simDev = null; dirty = false; selRun = null; syncForm(); setBadges(); hist(P, 'project', 'new project'); show('mode'); };
   $('pr-csv').onclick = () => {
     const r = runById(selRun) || P.runs[0]; if (!r) { msg('No runs to export.', 'err'); return; }
     const s = r.samples; download(`${r.id}_raw.csv`, 't_s,theta_rad,X_V,Y_V,I_A,T_K,valid\n' + s.t.map((t, i) => [t, s.theta[i], s.X[i], s.Y[i], s.I[i], s.T[i], s.valid[i]].join(',')).join('\n'), 'text/csv');
@@ -415,7 +656,7 @@
     return r.join('');
   }
   $('pr-report').onclick = () => {
-    const ok = P.runs.filter(r => r.derived), T = ok.map(r => r.T_mean), s = P.sample, m = P.method;
+    const ok = P.runs.filter(r => r.derived && Number.isFinite(r.T_mean)), T = ok.map(r => r.T_mean), s = P.sample, m = P.method;
     const row = (a, b) => `<tr><th>${esc(a)}</th><td>${esc(b)}</td></tr>`;
     const imgs = ok.length ? [['n_s (cm⁻²)', r => r.derived.ns / 1e4], ['µ (cm²/Vs)', r => r.derived.mu * 1e4], ['R_H (cm³/C)', r => r.derived.RH * 1e6]].map(([l, fn]) => `<h3>${esc(l)} vs temperature</h3><img alt="${esc(l)}" src="${chartImage([{ x: T, y: ok.map(fn), color: '#1b6fb5' }, { x: T, y: ok.map(fn), color: '#1b6fb5', kind: 'points' }], { xlabel: 'T (K)', ylabel: l })}">`).join('') : '<p>No analysed runs.</p>';
     const steps = P.tempProgram.map((st, i) => `<tr><td>${i + 1}</td><td>${esc(st.type)}</td><td>${esc(JSON.stringify(Object.fromEntries(Object.entries(st).filter(([k]) => k !== 'type'))))}</td></tr>`).join('');
@@ -438,8 +679,7 @@
   window.addEventListener('beforeunload', e => { if (dirty || running) { e.preventDefault(); e.returnValue = ''; } });
   window.addEventListener('error', e => Logger.error('JS', e.message));
   window.addEventListener('unhandledrejection', e => Logger.error('JS', 'Unhandled: ' + (e.reason && e.reason.message || e.reason)));
-  buildTabs(); syncForm(); setBadges(); Logger.info('APP', 'Workstation started (simulated backend)'); hist(P, 'project', 'new project');
-  show('hardware');
-  connectController();
-  window.HH.debugState = () => ({ P, ctrl, running });
+  buildTabs(); syncForm(); setBadges(); Logger.info('APP', 'Workstation started; select real instruments or explicit simulation'); hist(P, 'project', 'new project');
+  show('mode');
+  window.HH.debugState = () => ({ P, ctrl, running, connectionsOk, runner });
 })();
