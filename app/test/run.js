@@ -20,6 +20,41 @@ Logger.setLevel('debug');
     assert.strictEqual(await c.getHeaterRange(), 'off');
     console.log(model, 'program OK', measured.map(m => m.T.toFixed(3)).join(' '), 'virtual s:', now);
   }
+  // Full continuous window and time-weighted absolute error, including irregular polling.
+  {
+    const step = LS.makeStep('goto', { T: 300, tol: 0.1, mean_tol: 0.02, window_s: 10 });
+    const stability = new LS.TemperatureStability(step);
+    assert(!stability.update(0, 300.05, false).stable);
+    assert(!stability.update(10, 299.95, false).stable, 'opposite errors must not cancel');
+    assert(!stability.update(11, 300.2, false).stable, 'outlier resets full window');
+    assert(!stability.update(12, 300.01, false).stable);
+    assert(!stability.update(21, 299.99, false).stable);
+    assert(stability.update(22, 300.01, false).stable);
+    assert(!stability.update(23, 300, true).stable, 'ramping resets window');
+    const irregular = new LS.TemperatureStability(step);
+    irregular.update(0, 300.08, false);
+    irregular.update(2, 300, false);
+    const status = irregular.update(12, 300, false);
+    assert(status.stable && status.meanError === 0, 'old errors drop out of rolling window');
+    const weighted = new LS.TemperatureStability(step);
+    weighted.update(0, 300.04, false);
+    weighted.update(2, 300, false);
+    assert(Math.abs(weighted.update(10, 300, false).meanError - 0.004) < 1e-10);
+    assert(LS.validateProgram([LS.makeStep('goto', { mean_tol: 0.2, tol: 0.1 })]).length);
+    assert.throws(() => LS.sweep(300, Infinity, 1));
+    assert.throws(() => LS.sweep(300, 400, 0.001));
+    assert.deepStrictEqual(LS.sweep(310, 300, 5).filter(s => s.type === 'goto').map(s => s.T), [310, 305, 300]);
+  }
+  { // Mean criterion must gate measurement even when every reading is in band.
+    let now = 0, measured = false, off = false;
+    const ctrl = { setHeaterRange: async () => {}, setRamp: async () => {}, setSetpoint: async () => {},
+      readK: async () => 300.04, isRamping: async () => false, heaterPercent: async () => 10,
+      heaterOff: async () => { off = true; } };
+    const runner = new LS.ProgramRunner(ctrl, [LS.makeStep('goto', { T: 300, tol: 0.05, mean_tol: 0.01, window_s: 10, timeout_s: 20 }), LS.makeStep('measure')],
+      { now: () => now, sleep: async s => { now += s; }, measure: async () => { measured = true; } });
+    await assert.rejects(runner.run(), /Timeout/);
+    assert(off && !measured);
+  }
   // --- validation / safety
   assert(LS.validateProgram([LS.makeStep('goto', { T: 900 })], { maxK: 400 }).length);
   assert(LS.validateProgram([LS.makeStep('goto', { rate: 50 })], { maxRateKmin: 10 }).length);

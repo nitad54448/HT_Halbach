@@ -8,14 +8,14 @@
 <body>
 <header>
   <div class="brand"><strong>Halbach Hall workstation</strong> <small>· Hall effect, rotating Halbach field</small></div>
-  <div class="actions"><span class="badge sim" id="b-mode">Simulated backend</span><span class="badge" id="b-ls">Temp: not connected</span><span class="badge" id="b-run">Idle</span></div>
+  <div class="actions"><span class="badge sim" id="b-mode">Test mode ? simulated devices</span><span class="badge" id="b-ls">Temp: not connected</span><span class="badge" id="b-run">Idle</span></div>
 </header>
 <nav class="tabs" id="tabs" role="tablist"></nav>
 <main>
 
 <section class="page" id="p-hardware" data-title="Hardware">
   <h1>Hardware</h1>
-  <p class="intro">Declare which instruments are available, by type. The next page offers only the measurement modes these instruments can support. This build runs against a <b>simulated</b> backend (clearly flagged); real GPIB/VISA access arrives with the Tauri backend and uses the same driver code.</p>
+  <p class="intro">Test mode starts with all instruments available and the temperature controller connected automatically. Use the prepared CHIRP setup or change the settings below, then open <b>Run</b> to start the test program. All readings are synthetic; no physical devices are accessed.</p>
   <div class="subtabs" role="tablist" id="hw-subtabs">
     <button data-sub="temp" class="active">Temperature control</button><button data-sub="magnet">Magnet</button><button data-sub="source">Current source</button><button data-sub="measure">Measure</button>
   </div>
@@ -108,15 +108,21 @@
 
 <section class="page" id="p-temp" data-title="Temperature program">
   <h1>Temperature program</h1>
-  <p class="intro">Step programming for the Lake Shore controller. <b>Go to</b> sets heater range, ramp rate and setpoint, then waits until the temperature stays within tolerance for the stability window. <b>Measure</b> runs the CHIRP acquisition at that temperature. On any error or abort the heater is switched off.</p>
+  <p class="intro">Build a temperature program from a start, end and positive step size (cooling sweeps are supported). Each point ramps, waits for stability, then measures using the selected measurement mode. ?T means measured temperature minus target: every reading must stay within the instantaneous limit for the entire window, and the time-averaged |?T| must meet the mean limit. A timeout or abort switches the heater off. An end point is included only when reached by a whole step.</p>
   <div class="card"><div class="toolbar">
     <div class="field"><label>Add step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add</button>
     <span style="width:24px"></span>
     <div class="field"><label>Sweep from (K)</label><input id="sw0" type="number" value="300"></div><div class="field"><label>to (K)</label><input id="sw1" type="number" value="320"></div><div class="field"><label>step (K)</label><input id="swd" type="number" value="10"></div>
-    <div class="field"><label>rate (K/min)</label><input id="swr" type="number" value="5"></div><button class="secondary" id="add-sweep">Append sweep (go+measure)</button>
+    <div class="field"><label>rate (K/min)</label><input id="swr" type="number" value="5"></div><div class="field"><label for="sw-tol">Maximum |?T| (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
+    <div class="field"><label for="sw-mean">Mean |?T| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
+    <div class="field"><label for="sw-window">Stability window (s)</label><input id="sw-window" type="number" min="1" value="60"></div>
+    <div class="field"><label for="sw-timeout">Timeout per point (s)</label><input id="sw-timeout" type="number" min="1" value="3600"></div>
+    <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>
+    <button class="secondary" id="add-sweep">Append temperature program</button>
     <button class="secondary" id="clear-prog">Clear</button>
   </div>
   <div class="tablewrap"><table id="prog-table"></table></div>
+  <div id="sweep-msg" role="status"></div>
   <div id="prog-msg" style="margin-top:12px"></div></div>
 </section>
 
@@ -128,6 +134,7 @@
     <div class="field" style="margin-left:18px"><label>Simulation speed</label><select id="r-speed"><option value="1">1× (real time)</option><option value="20">20×</option><option value="200">200×</option><option value="0" selected>Max</option></select></div>
   </div>
   <div class="progress" style="margin:16px 0 6px"><div id="r-prog"></div></div><div id="r-status" class="muted">Idle</div></div>
+  <div id="r-stability" class="muted" role="status"></div>
   <div class="kpis" id="r-kpis"></div>
   <div class="grid g2" style="margin-top:16px"><div class="card"><h2>Temperature</h2><canvas id="c-temp"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>measured</span><span><i style="background:#e3b96e"></i>setpoint</span></div></div>
   <div class="card"><h2>Program steps</h2><div class="tablewrap"><table id="run-steps"></table></div></div></div>

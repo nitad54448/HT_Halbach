@@ -68,12 +68,24 @@
     };
   }
 
+  // Ready-to-run fixture; keep newProject blank for project import defaults.
+  function newTestProject() {
+    const p = newProject();
+    p.sample.id = 'TEST-001';
+    p.sample.notes = 'Synthetic test sample. All instruments and measurements are simulated.';
+    Object.assign(p.hardware.magnet, { rotator: 'OWISPS10', rotator_addr: 'SIM::ROTATOR', encoder: 'NI9413', encoder_addr: 'SIM::ENCODER' });
+    Object.assign(p.hardware.source, { model: 'K6221', address: 'GPIB0::13::INSTR' });
+    Object.assign(p.hardware.measure, { volt: 'K2182A', volt_addr: 'GPIB0::7::INSTR', lockin1: 'SR830', lockin1_addr: 'GPIB0::8::INSTR', lockin2: 'SR830', lockin2_addr: 'GPIB0::9::INSTR' });
+    p.method.kind = 'chirp';
+    return p;
+  }
+
   function hist(project, kind, text, extra) {
     project.history.push(Object.assign({ t: new Date().toISOString(), kind, text }, extra || {}));
     project.modified = new Date().toISOString();
     bus.emit('history:add');
   }
 
-  const api = { LEVELS, bus, Logger, newProject, hist };
+  const api = { LEVELS, bus, Logger, newProject, newTestProject, hist };
   if (typeof module !== 'undefined') module.exports = api; else root.HH = Object.assign(root.HH || {}, api);
 })(typeof window !== 'undefined' ? window : globalThis);

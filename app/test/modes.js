@@ -1,7 +1,15 @@
 const assert = require('assert');
-const { newProject } = require('../js/core.js');
+const { newProject, newTestProject } = require('../js/core.js');
 const M = require('../js/modes.js'), A = require('../js/analysis.js'), S = require('../js/sim.js');
 (async () => {
+  const demo = newTestProject();
+  assert(Object.values(M.availability(demo.hardware)).every(a => a.ok), 'test setup supports all modes');
+  assert.deepStrictEqual(M.modeErrors(demo), []);
+  assert.deepStrictEqual(M.sampleErrors(demo), []);
+  assert(demo.simulated);
+  const other = newTestProject();
+  demo.hardware.source.model = '';
+  assert.strictEqual(other.hardware.source.model, 'K6221', 'test projects have independent settings');
   const p = newProject(), h = p.hardware;
   assert(Object.values(M.availability(h)).every(a => !a.ok), 'nothing available with no instruments');
   h.magnet.rotator = 'OWISPS10'; h.magnet.encoder = 'NI9413';

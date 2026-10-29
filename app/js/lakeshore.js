@@ -73,7 +73,7 @@
 
   /* ---------------- Step programming ---------------- */
   const STEP_TYPES = {
-    goto: { label: 'Go to T and stabilise', defaults: { T: 300, rate: 5, range: 'medium', tol: 0.05, window_s: 60, timeout_s: 3600 } },
+    goto: { label: 'Go to T and stabilise', defaults: { T: 300, rate: 5, range: 'medium', tol: 0.05, mean_tol: 0.02, window_s: 60, timeout_s: 3600 } },
     soak: { label: 'Soak / wait', defaults: { seconds: 60 } },
     measure: { label: 'Run Hall measurement', defaults: { label: '' } },
     heater_off: { label: 'Heater off', defaults: {} },
@@ -81,7 +81,8 @@
   function makeStep(type, over) { return Object.assign({ type }, STEP_TYPES[type].defaults, over || {}); }
   /** Generate goto+measure pairs for a linear temperature sweep (inclusive). */
   function sweep(T0, T1, dT, base) {
-    if (!(dT > 0)) throw new Error('Step must be > 0');
+    if (![T0, T1, dT].every(Number.isFinite) || !(dT > 0)) throw new Error('Start, end and step must be finite; step must be > 0');
+    if (Math.abs(T1 - T0) / dT > 999) throw new Error('Sweep is limited to 1000 temperature points');
     const out = [], dir = T1 >= T0 ? 1 : -1, n = Math.floor(Math.abs(T1 - T0) / dT + 1e-9);
     for (let k = 0; k <= n; k++) {
       const T = +(T0 + dir * k * dT).toFixed(4);
@@ -99,9 +100,10 @@
         if (!(s.T >= L.minK && s.T <= L.maxK)) errs.push(w + `T must be ${L.minK}..${L.maxK} K`);
         if (!(s.rate > 0 && s.rate <= L.maxRateKmin)) errs.push(w + `rate must be >0 and ≤ ${L.maxRateKmin} K/min`);
         if (!(s.range in RANGES) || s.range === 'off') errs.push(w + 'heater range must be low/medium/high');
-        if (!(s.tol > 0)) errs.push(w + 'tolerance must be > 0');
-        if (!(s.window_s >= 1)) errs.push(w + 'stability window must be ≥ 1 s');
-        if (!(s.timeout_s > s.window_s)) errs.push(w + 'timeout must exceed the stability window');
+        if (s.mean_tol !== undefined && !(Number.isFinite(s.mean_tol) && s.mean_tol > 0 && s.mean_tol <= s.tol)) errs.push(w + 'mean error limit must be > 0 and no greater than the instantaneous error limit');
+        if (!(Number.isFinite(s.tol) && s.tol > 0)) errs.push(w + 'tolerance must be > 0');
+        if (!(Number.isFinite(s.window_s) && s.window_s >= 1)) errs.push(w + 'stability window must be ≥ 1 s');
+        if (!(Number.isFinite(s.timeout_s) && s.timeout_s > s.window_s)) errs.push(w + 'timeout must exceed the stability window');
       }
       if (s.type === 'soak' && !(s.seconds >= 0)) errs.push(w + 'seconds must be ≥ 0');
     });
@@ -117,6 +119,31 @@
       else if (s.type === 'soak') tot += s.seconds;
     }
     return tot; // seconds, excluding measurement time
+  }
+
+  // A continuous in-band window, using a time-weighted mean absolute error.
+  // Legacy steps without mean_tol retain their original instantaneous criterion.
+  class TemperatureStability {
+    constructor(step) { this.s = step; this.points = []; }
+    update(t, T, ramping) {
+      const s = this.s, error = Math.abs(T - s.T);
+      if (ramping || !Number.isFinite(T) || error > s.tol) this.points = [];
+      else this.points.push({ t, error });
+      const start = t - s.window_s;
+      while (this.points.length > 1 && this.points[1].t <= start) this.points.shift();
+      const covered = this.points.length > 1 && this.points[0].t <= start;
+      let integral = 0;
+      if (covered) {
+        for (let i = 1; i < this.points.length; i++) {
+          const a = this.points[i - 1], b = this.points[i], left = Math.max(start, a.t);
+          const eLeft = a.error + (b.error - a.error) * (left - a.t) / (b.t - a.t);
+          integral += (eLeft + b.error) * (b.t - left) / 2;
+        }
+      }
+      const meanError = covered ? integral / s.window_s : null;
+      return { error, meanError, stableFor: this.points.length ? Math.min(s.window_s, t - this.points[0].t) : 0,
+        stable: covered && meanError <= (s.mean_tol === undefined ? s.tol : s.mean_tol) };
+    }
   }
 
   /** Executes a program. env = { sleep(sec), now() (sec), measure(ctx) -> Promise, onStep(i, step, state), onTemp(s), pollSec } */
@@ -159,13 +186,13 @@
         await this.c.setHeaterRange(s.range);
         await this.c.setRamp(true, s.rate);
         await this.c.setSetpoint(s.T, this.limits.maxK);
-        const t0 = this.env.now(); let inBandSince = null;
+        const t0 = this.env.now(), stability = new TemperatureStability(s);
         for (;;) {
           await this._checkpoint();
           const T = await this.c.readK(), ramping = await this.c.isRamping(), now = this.env.now();
-          this.env.onTemp && this.env.onTemp({ t: now, T, setpoint: s.T, heater: await this.c.heaterPercent() });
-          if (!ramping && Math.abs(T - s.T) <= s.tol) { if (inBandSince === null) inBandSince = now; } else inBandSince = null;
-          if (inBandSince !== null && now - inBandSince >= s.window_s) { Logger.info('PROG', `Stable at ${T.toFixed(3)} K (set ${s.T})`); return; }
+          const status = stability.update(now, T, ramping);
+          this.env.onTemp && this.env.onTemp({ t: now, T, setpoint: s.T, heater: await this.c.heaterPercent(), stability: status });
+          if (status.stable) { Logger.info('PROG', `Stable at ${T.toFixed(3)} K (set ${s.T}; mean absolute error ${status.meanError.toFixed(4)} K over ${s.window_s} s)`); return; }
           if (now - t0 > s.timeout_s) throw new Error(`Timeout: did not stabilise at ${s.T} K within ${s.timeout_s} s (last ${T.toFixed(3)} K)`);
           await this.env.sleep(poll);
         }
@@ -219,6 +246,6 @@
     async query(c) { const r = this._handle(c); if (r === null) throw new Error('SIM: command has no reply: ' + c); return r; }
   }
 
-  const api = { MODELS, RANGES, STEP_TYPES, LakeShore, SimLakeShore, ProgramRunner, makeStep, sweep, validateProgram, programWarnings, estimateDuration };
+  const api = { MODELS, RANGES, STEP_TYPES, LakeShore, SimLakeShore, ProgramRunner, TemperatureStability, makeStep, sweep, validateProgram, programWarnings, estimateDuration };
   if (typeof module !== 'undefined') module.exports = api; else Object.assign(HH, api);
 })(typeof window !== 'undefined' ? window : globalThis);

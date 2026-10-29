@@ -11,7 +11,12 @@
     a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
 
-  let P = newProject(), dirty = false;
+  function testProject() {
+    const p = HH.newTestProject();
+    p.tempProgram = [...HH.sweep(295, 305, 10, { rate: 5, window_s: 10 }), HH.makeStep('heater_off')];
+    return p;
+  }
+  let P = testProject(), dirty = false;
   let ctrl = null, simDev = null, runner = null, running = false, vnow = 0;
   let trace = { t: [], T: [], sp: [] }, stepState = [], selRun = null;
 
@@ -121,10 +126,10 @@
   function setBadges() {
     const m = $('b-ls'); m.textContent = ctrl ? `Temp: ${P.hardware.tempController.model} connected` : 'Temp: not connected'; m.className = 'badge ' + (ctrl ? 'ok' : '');
     const r = $('b-run'); r.textContent = running ? (runner?.state === 'paused' ? 'Paused' : 'Running') : 'Idle'; r.className = 'badge ' + (running ? 'run' : '');
-    $('ls-connect').disabled = !!ctrl; $('ls-disconnect').disabled = !ctrl || running; $('ls-heateroff').disabled = !ctrl;
-    document.querySelectorAll('[data-bind],#f-levels').forEach(el => el.disabled = running);
+    $('ls-connect').disabled = !!ctrl || running; $('ls-disconnect').disabled = !ctrl || running; $('ls-heateroff').disabled = !ctrl;
+    document.querySelectorAll('[data-bind],#f-levels,#p-temp .toolbar input,#p-temp .toolbar select,#p-temp .toolbar button').forEach(el => el.disabled = running);
   }
-  $('ls-connect').onclick = async () => {
+  async function connectController() {
     const c = P.hardware.tempController;
     try {
       simDev = new HH.SimLakeShore(c.model, 295, 7);
@@ -133,8 +138,9 @@
       $('ls-info').textContent = `${id.manufacturer} ${id.model}, s/n ${id.serial}, fw ${id.firmware} — SIMULATED at ${c.address}`;
       hist(P, 'hardware', `Connected ${c.model} (simulated) input ${c.input}, loop ${c.loop}`);
     } catch (e) { Logger.error('HW', 'Connect failed: ' + e.message); $('ls-info').textContent = 'Connect failed: ' + e.message; }
-    setBadges(); refreshTabs();
-  };
+    setBadges(); refreshTabs(); renderHardware();
+  }
+  $('ls-connect').onclick = connectController;
   $('ls-disconnect').onclick = () => { ctrl = null; simDev = null; Logger.info('HW', 'Disconnected'); hist(P, 'hardware', 'Disconnected'); $('ls-info').textContent = ''; setBadges(); refreshTabs(); };
   $('ls-heateroff').onclick = async () => { try { await ctrl.heaterOff(); hist(P, 'hardware', 'Heater switched off by user'); } catch (e) { Logger.error('HW', e.message); } };
 
@@ -177,8 +183,8 @@
   function progErrors() { return HH.validateProgram(P.tempProgram, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin }); }
   function renderProgram() {
     const sel = $('add-type'); if (!sel.childElementCount) for (const [k, v] of Object.entries(HH.STEP_TYPES)) sel.add(new Option(v.label, k));
-    const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'tol', 'window_s', 'timeout_s'], soak: ['seconds'], measure: ['label'], heater_off: [] };
-    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', tol: 'Tol ±K', window_s: 'Stable for (s)', timeout_s: 'Timeout (s)', seconds: 'Seconds', label: 'Label' };
+    const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'tol', 'mean_tol', 'window_s', 'timeout_s'], soak: ['seconds'], measure: ['label'], heater_off: [] };
+    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', tol: 'Tol ±K', mean_tol: 'Mean |?T| (K)', window_s: 'Window (s)', timeout_s: 'Timeout (s)', seconds: 'Seconds', label: 'Label' };
     t.innerHTML = '<tr><th>#</th><th>Step</th><th>Parameters</th><th></th></tr>';
     P.tempProgram.forEach((s, i) => {
       const tr = t.insertRow(); tr.insertCell().textContent = i + 1; tr.insertCell().textContent = HH.STEP_TYPES[s.type].label;
@@ -188,7 +194,7 @@
         let inp;
         if (k === 'range') { inp = document.createElement('select'); ['low', 'medium', 'high'].forEach(r => inp.add(new Option(r, r))); }
         else { inp = document.createElement('input'); inp.type = k === 'label' ? 'text' : 'number'; inp.step = 'any'; inp.style.width = k === 'label' ? '120px' : '90px'; }
-        inp.value = s[k]; inp.disabled = running;
+        inp.value = k === 'mean_tol' && s[k] === undefined ? s.tol : s[k]; inp.disabled = running;
         inp.onchange = () => { const old = s[k]; s[k] = k === 'label' || k === 'range' ? inp.value : Number(inp.value); hist(P, 'program', `step ${i + 1} ${k}: ${old} → ${s[k]}`); dirty = true; renderProgram(); refreshTabs(); };
         w.append(inp); c.append(w);
       });
@@ -205,8 +211,18 @@
   function fmtDur(s) { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`; }
   $('add-step').onclick = () => { const ty = $('add-type').value; P.tempProgram.push(HH.makeStep(ty)); hist(P, 'program', 'added step ' + ty); dirty = true; renderProgram(); refreshTabs(); };
   $('add-sweep').onclick = () => {
-    try { P.tempProgram.push(...HH.sweep(+$('sw0').value, +$('sw1').value, +$('swd').value, { rate: +$('swr').value })); hist(P, 'program', `sweep ${$('sw0').value}→${$('sw1').value} K step ${$('swd').value}`); dirty = true; }
-    catch (e) { Logger.error('UI', e.message); }
+    if (running) return;
+    try {
+      const steps = HH.sweep(+$('sw0').value, +$('sw1').value, +$('swd').value, {
+        rate: +$('swr').value, tol: +$('sw-tol').value, mean_tol: +$('sw-mean').value,
+        window_s: +$('sw-window').value, timeout_s: +$('sw-timeout').value, range: $('sw-range').value,
+      });
+      const errors = HH.validateProgram(steps, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
+      if (errors.length) throw new Error(errors[0]);
+      P.tempProgram.push(...steps);
+      hist(P, 'program', `Appended ${steps.length / 2} temperature points`, { steps }); dirty = true;
+      $('sweep-msg').textContent = `Added ${steps.length / 2} temperature points, each followed by a measurement.`;
+    } catch (e) { Logger.error('UI', e.message); $('sweep-msg').textContent = e.message; }
     renderProgram(); refreshTabs();
   };
   $('clear-prog').onclick = () => { if (P.tempProgram.length && confirm('Delete all program steps?')) { P.tempProgram = []; hist(P, 'program', 'cleared'); renderProgram(); refreshTabs(); } };
@@ -232,13 +248,15 @@
 
   $('r-start').onclick = async () => {
     if (running) return;
+    if (!ctrl || progErrors().length || methodErrors().length) { renderRun(); return; }
     if (P.runs.length && !confirm('Runs already exist in this project. New runs will be appended. Continue?')) return;
+    $('r-stability').textContent = '';
     const speed = Number($('r-speed').value); vnow = 0; trace = { t: [], T: [], sp: [] }; stepState = [];
     const total = P.tempProgram.length;
     const env = {
       pollSec: 2, now: () => vnow,
       sleep: async s => { simDev.advance(s); vnow += s; if (speed > 0) await sleepReal(s * 1000 / speed); else if (Math.round(vnow) % 20 === 0) await sleepReal(0); },
-      onTemp: s => { trace.t.push(s.t); trace.T.push(s.T); trace.sp.push(s.setpoint); updateKpis(s); drawTemp(); },
+      onTemp: s => { if (s.stability) $('r-stability').textContent = `Temperature stability: |?T| ${fx(s.stability.error)} K; mean |?T| ${s.stability.meanError === null ? 'collecting window' : fx(s.stability.meanError) + ' K'}; in band ${fx(s.stability.stableFor)} s`; trace.t.push(s.t); trace.T.push(s.T); trace.sp.push(s.setpoint); updateKpis(s); drawTemp(); },
       onStep: (i, s, st) => { stepState[i] = st; $('r-prog').style.width = ((st === 'done' ? i + 1 : i) / total * 100) + '%'; setStatus(`Step ${i + 1}/${total}: ${HH.STEP_TYPES[s.type].label}`); hist(P, 'run', `Step ${i + 1} ${st}: ${s.type}`); renderRun(); },
       measure: ctx => measure(ctx, speed),
     };
@@ -380,10 +398,10 @@
       np.runs.forEach(r => { if (!r.fit && !r.fitError) fitRun(r); });
       if (Array.isArray(o.log)) { Logger.entries = o.log.slice(-Logger.max); Logger.seq = Logger.entries.reduce((m, e) => Math.max(m, e.n || 0), 0); }
       hist(P, 'project', `loaded ${f.name} (${P.runs.length} runs)`); Logger.info('IO', `Loaded project ${f.name}: ${P.runs.length} runs`);
-      syncForm(); setBadges(); msg(`Loaded ${f.name}: ${P.runs.length} runs. Controller disconnected — reconnect to run again.`, 'ok'); show(P.runs.length ? 'analysis' : 'project');
+      syncForm(); await connectController(); msg(`Loaded ${f.name}: ${P.runs.length} runs. Test controller connected; new measurements are simulated.`, 'ok'); show(P.runs.length ? 'analysis' : 'project');
     } catch (e) { Logger.error('IO', 'Load failed: ' + e.message); msg('Load failed: ' + e.message, 'err'); }
   };
-  $('pr-new').onclick = () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = newProject(); ctrl = null; simDev = null; dirty = false; selRun = null; syncForm(); setBadges(); hist(P, 'project', 'new project'); show('hardware'); };
+  $('pr-new').onclick = async () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = testProject(); ctrl = null; simDev = null; dirty = false; selRun = null; syncForm(); setBadges(); hist(P, 'project', 'new test project'); await connectController(); show('hardware'); };
   $('pr-csv').onclick = () => {
     const r = runById(selRun) || P.runs[0]; if (!r) { msg('No runs to export.', 'err'); return; }
     const s = r.samples; download(`${r.id}_raw.csv`, 't_s,theta_rad,X_V,Y_V,I_A,T_K,valid\n' + s.t.map((t, i) => [t, s.theta[i], s.X[i], s.Y[i], s.I[i], s.T[i], s.valid[i]].join(',')).join('\n'), 'text/csv');
@@ -422,5 +440,6 @@
   window.addEventListener('unhandledrejection', e => Logger.error('JS', 'Unhandled: ' + (e.reason && e.reason.message || e.reason)));
   buildTabs(); syncForm(); setBadges(); Logger.info('APP', 'Workstation started (simulated backend)'); hist(P, 'project', 'new project');
   show('hardware');
+  connectController();
   window.HH.debugState = () => ({ P, ctrl, running });
 })();
