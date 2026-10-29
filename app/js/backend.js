@@ -55,6 +55,7 @@
         clearTimeout(timer);
       }
     },
+    checkDevice: d => request('check', d),
     readDevice: d => request('read', d),
     waitForReference: d => request('lock', d, (d.lockTimeout || 30) * 1000 + 8000),
     startProgram: p => request('run', { project: {hardware:p.hardware,method:p.method,sample:p.sample,tempProgram:p.tempProgram} }),

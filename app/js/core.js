@@ -62,7 +62,7 @@
         fixed: { excitation: 'ac', acq: 'step', I_mA: 1, nplc: 1, carrier_hz: 700, n_angles: 36, settle_s: 2, rot_hz: 0.05, reverse: true },
         rotating: { excitation: 'ac', currents_mA: [-5, -2.5, 0, 2.5, 5], I_mA: 1, rot_hz: 0.2, carrier_hz: 700, sideband: 'lower', duration_s: 60, background: true },
       },
-      tempProgram: [],
+      tempProgram: [{ type: 'measure', label: 'Room temp' }],
       runs: [],        // one per measurement step: {id, T_set, T_mean, started, fit, samples:{t,theta,X,Y,I,T}, flags}
       history: [],     // audit trail of user actions & run lifecycle
       log: [],

@@ -110,6 +110,10 @@
     el.classList.remove('bad');
     const old = getPath(P, path); setPath(P, path, v);
     if (path.startsWith('hardware.') || principlePath(path)) { connectionCheck = null; ctrl = null; simDev = null; }
+    if (path === 'hardware.temperature' && v === 'off') {
+      P.tempProgram = P.tempProgram.filter(s => !['goto', 'heater_off'].includes(s.type));
+      if (!P.tempProgram.length) P.tempProgram = [{ type: 'measure', label: 'Room temp' }];
+    }
     if (old !== v) { hist(P, 'config', `${path}: ${old} → ${v}`); Logger.verbose('CFG', `${path} = ${v} (was ${old})`); dirty = true; }
     if(running && path.startsWith('method.')&&!principlePath(path)) $('parameter-status').textContent='Edited parameters have not been applied.';
     if (path.startsWith('hardware.tempController')) { if (ctrl) Logger.warn('CFG', 'Reconnect for controller settings to take effect'); }
@@ -141,6 +145,10 @@
     const errors = HH.principleErrors(base.method);
     if (errors.length) throw new Error('Invalid preset: ' + errors.join(' '));
     P.method = base.method; P.hardware = base.hardware;
+    if (P.hardware.temperature === 'off') {
+      P.tempProgram = P.tempProgram.filter(s => !['goto', 'heater_off'].includes(s.type));
+      if (!P.tempProgram.length) P.tempProgram = [{ type: 'measure', label: 'Room temp' }];
+    }
     connectionCheck = null; ctrl = null; simDev = null; dirty = true;
     hist(P, 'preset', 'Loaded ' + (o.name || 'preset'));
     syncForm(); renderMode(); refreshTabs();
@@ -446,16 +454,62 @@
   /* ---------------- temperature program ---------------- */
   const tl = () => P.hardware.tempController;
   function progErrors() {
+    if (P.hardware.temperature === 'off') {
+      if (!P.tempProgram.length) return ['Measurement program is empty. Add a measurement step.'];
+      const e = [];
+      if (P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type))) {
+        e.push('Temperature control is OFF. Remove temperature steps (goto / heater off) or enable Temperature control in Devices.');
+      }
+      return e;
+    }
     const e = HH.validateProgram(P.tempProgram, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
     if (P.hardware.temperature !== 'control' && P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type))) e.push('Temperature OFF/read only permits measurement and soak steps. Remove temperature control steps or enable control.');
     return e;
   }
   function renderProgram() {
     renderMode();
+    const isTempOff = P.hardware.temperature === 'off';
+    const isTempControl = P.hardware.temperature === 'control';
+
+    // If temperature is OFF, sanitize program to remove goto/heater_off steps
+    if (isTempOff) {
+      const hasTempSteps = P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type));
+      if (hasTempSteps) {
+        P.tempProgram = P.tempProgram.filter(s => !['goto', 'heater_off'].includes(s.type));
+      }
+      if (P.tempProgram.length === 0) {
+        P.tempProgram = [{ type: 'measure', label: 'Room temp' }];
+      }
+    }
+
+    const heading = $('prog-heading');
+    if (heading) heading.textContent = isTempOff ? 'Measurement sequence (Ambient)' : 'Temperature program';
+
+    const intro = $('prog-intro');
+    if (intro) {
+      intro.textContent = isTempOff
+        ? 'Measurements run at ambient room temperature without heating or stabilization.'
+        : 'Build a temperature program from start, steps, and end temperatures (including multi-segment ramps and cooling).';
+    }
+
+    const tempOffNotice = $('prog-temp-off-notice');
+    if (tempOffNotice) tempOffNotice.hidden = !isTempOff;
+
+    const sweepGroup = $('prog-sweep-group');
+    if (sweepGroup) sweepGroup.hidden = !isTempControl;
+
+    const previewCard = $('prog-preview-card');
+    if (previewCard) previewCard.hidden = !isTempControl;
+
+    const progGrid = $('prog-grid');
+    if (progGrid) {
+      progGrid.className = isTempControl ? 'grid g2' : 'grid';
+    }
+
     const sel = $('add-type'); if (!sel.childElementCount) for (const [k, v] of Object.entries(HH.STEP_TYPES)) sel.add(new Option(v.label, k));
-    for (const o of sel.options) o.disabled = P.hardware.temperature !== 'control' && ['goto', 'heater_off'].includes(o.value);
+    for (const o of sel.options) o.disabled = !isTempControl && ['goto', 'heater_off'].includes(o.value);
     if (sel.selectedOptions[0]?.disabled) sel.value = 'measure';
-    $('add-sweep').disabled = running || P.hardware.temperature !== 'control';
+    $('add-sweep').disabled = running || !isTempControl;
     const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'min_stab_s', 'max_stab_s', 'avg_s', 'tol', 'mean_tol', 'esd_tol'], soak: ['seconds'], measure: ['label'], heater_off: [] };
     const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', min_stab_s: 'Min stab (s)', max_stab_s: 'Max stab (s)', avg_s: 'Avg win (s)', tol: 'Max |ΔT| (K)', mean_tol: 'Mean |ΔT| (K)', esd_tol: 'ESD σ_T (K)', seconds: 'Seconds', label: 'Label' };
     t.innerHTML = '<tr><th>#</th><th>Step</th><th>Parameters</th><th></th></tr>';
@@ -483,12 +537,18 @@
       [['↑', -1], ['↓', 1]].forEach(([l, d]) => { const b = document.createElement('button'); b.className = 'secondary'; b.textContent = l; b.disabled = running || i + d < 0 || i + d >= P.tempProgram.length; b.onclick = () => { const a = P.tempProgram; [a[i], a[i + d]] = [a[i + d], a[i]]; hist(P, 'program', `moved step ${i + 1}`); dirty = true; renderProgram(); }; ac.append(b, ' '); });
       const x = document.createElement('button'); x.className = 'danger'; x.textContent = '✕'; x.disabled = running; x.onclick = () => { P.tempProgram.splice(i, 1); hist(P, 'program', `deleted step ${i + 1} (${s.type})`); dirty = true; renderProgram(); refreshTabs(); }; ac.append(x);
     });
-    drawProgramPreview();
-    const errs = progErrors(), warn = HH.programWarnings(P.tempProgram), est = HH.estimateDuration(P.tempProgram, 295);
+    if (isTempControl) {
+      drawProgramPreview();
+    }
+    const errs = progErrors(), warn = HH.programWarnings(P.tempProgram);
+    const est = isTempControl ? HH.estimateDuration(P.tempProgram, 295) : 0;
     const meas = P.tempProgram.filter(s => s.type === 'measure').length, per = Math.round(HH.acqSeconds(P.method));
-    $('prog-msg').innerHTML = (P.tempProgram.length ? '' : '<div class="muted">No steps yet. Add steps or append a sweep.</div>') +
+    const durMsg = isTempControl
+      ? `Estimated duration ≈ ${fmtDur(est + meas * per)} (thermal ${fmtDur(est)} + ${meas} measurements × ${per} s), assuming start at 295 K.`
+      : `Estimated duration ≈ ${fmtDur(meas * per)} (${meas} measurement${meas === 1 ? '' : 's'} × ${per} s at ambient temperature).`;
+    $('prog-msg').innerHTML = (P.tempProgram.length ? '' : '<div class="muted">No steps yet. Add a measurement step.</div>') +
       errs.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + warn.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
-      (P.tempProgram.length && !errs.length ? `<div class="notice ok">Valid. Estimated duration ≈ ${fmtDur(est + meas * per)} (thermal ${fmtDur(est)} + ${meas} measurements × ${per} s), assuming start at 295 K.</div>` : '');
+      (P.tempProgram.length && !errs.length ? `<div class="notice ok">Valid. ${durMsg}</div>` : '');
   }
   $('apply-parameters').onclick=async()=>{
     if(HH.modeErrors(P).length||progErrors().length||parameterBusy)return;

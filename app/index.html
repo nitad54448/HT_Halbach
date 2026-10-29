@@ -159,28 +159,31 @@
       <div class="field"><label>Acquisition duration per current (s)</label><input type="number" data-bind="method.rotating.duration_s" data-num></div>
       <div class="field" data-when="ac"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
   </div></div>
-<h2>Temperature program</h2>
-  <p class="intro">Build a temperature program from start, steps, and end temperatures (including multi-segment ramps and cooling). Temperature stability requires remaining continuously in-band for the minimum stabilization time, with time-averaged |ΔT| below the tolerance threshold and temperature standard deviation (ESD σ_T) below the ESD limit during the averaging window.</p>
+<h2 id="prog-heading">Temperature program</h2>
+  <div id="prog-temp-off-notice" class="notice ok" hidden>Temperature control is <strong>OFF</strong>. The experiment will execute at ambient room temperature without temperature ramps or stabilization delays.</div>
+  <p class="intro" id="prog-intro">Build a temperature program from start, steps, and end temperatures (including multi-segment ramps and cooling). Temperature stability requires remaining continuously in-band for the minimum stabilization time, with time-averaged |ΔT| below the tolerance threshold and temperature standard deviation (ESD σ_T) below the ESD limit during the averaging window.</p>
   <div class="card"><div class="toolbar">
     <div class="field"><label>Add single step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add step</button>
-    <span style="width:24px"></span>
-    <div class="field"><label>Start T (K)</label><input id="sw0" type="number" value="300"></div>
-    <div class="field"><label>End T (K)</label><input id="sw1" type="number" value="320"></div>
-    <div class="field"><label>Step ΔT (K)</label><input id="swd" type="number" value="10"></div>
-    <div class="field"><label>Ramp rate (K/min)</label><input id="swr" type="number" value="5"></div>
-    <div class="field"><label for="sw-minstab">Min stabilization time (s)</label><input id="sw-minstab" type="number" min="1" value="60"></div>
-    <div class="field"><label for="sw-maxstab">Max stab. timeout (s)</label><input id="sw-maxstab" type="number" min="1" value="3600"></div>
-    <div class="field"><label for="sw-window">Averaging duration (s)</label><input id="sw-window" type="number" min="1" value="30"></div>
-    <div class="field"><label for="sw-tol">Max |ΔT| in window (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
-    <div class="field"><label for="sw-mean">Mean |ΔT| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
-    <div class="field"><label for="sw-esd">Max ESD σ_T (K)</label><input id="sw-esd" type="number" min="0" step="any" value="0.02"></div>
-    <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>
-    <button class="secondary" id="add-sweep">Append ramp + steps</button>
+    <div id="prog-sweep-group" style="display:inline-flex;gap:10px;align-items:end;flex-wrap:wrap">
+      <span style="width:24px"></span>
+      <div class="field"><label>Start T (K)</label><input id="sw0" type="number" value="300"></div>
+      <div class="field"><label>End T (K)</label><input id="sw1" type="number" value="320"></div>
+      <div class="field"><label>Step ΔT (K)</label><input id="swd" type="number" value="10"></div>
+      <div class="field"><label>Ramp rate (K/min)</label><input id="swr" type="number" value="5"></div>
+      <div class="field"><label for="sw-minstab">Min stabilization time (s)</label><input id="sw-minstab" type="number" min="1" value="60"></div>
+      <div class="field"><label for="sw-maxstab">Max stab. timeout (s)</label><input id="sw-maxstab" type="number" min="1" value="3600"></div>
+      <div class="field"><label for="sw-window">Averaging duration (s)</label><input id="sw-window" type="number" min="1" value="30"></div>
+      <div class="field"><label for="sw-tol">Max |ΔT| in window (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
+      <div class="field"><label for="sw-mean">Mean |ΔT| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
+      <div class="field"><label for="sw-esd">Max ESD σ_T (K)</label><input id="sw-esd" type="number" min="0" step="any" value="0.02"></div>
+      <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>
+      <button class="secondary" id="add-sweep">Append ramp + steps</button>
+    </div>
     <button class="secondary" id="clear-prog">Clear</button>
   </div>
-  <div class="grid g2" style="margin-top:12px;margin-bottom:12px">
+  <div class="grid g2" style="margin-top:12px;margin-bottom:12px" id="prog-grid">
     <div class="tablewrap"><table id="prog-table"></table></div>
-    <div class="card" style="background:#0d1721;margin:0">
+    <div class="card" id="prog-preview-card" style="background:#0d1721;margin:0">
       <h3>Planned temperature profile (T vs estimated time)</h3>
       <canvas id="c-prog-preview" style="height:240px"></canvas>
       <div id="prog-preview-stats" class="muted" style="margin-top:6px;font-size:12px"></div>
