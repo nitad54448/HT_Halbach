@@ -98,9 +98,19 @@ impl Config {
             return Err("Direction must be +1 or -1".into());
         }
         num(&h["magnet"]["angle_offset_deg"])?;
-        let source = tag(&h["source"]["model"], &["K6220", "K6221"], "current source")?;
-        if exc == "ac" && source != "K6221" {
-            return Err("AC sourcing requires 6221".into());
+        let source = tag(
+            &h["source"]["model"],
+            &["K6220", "K6221", "MFLI"],
+            "current source",
+        )?;
+        if exc == "ac" && !["K6221", "MFLI"].contains(&source) {
+            return Err("AC sourcing requires Keithley 6221 or Zurich MFLI".into());
+        }
+        if exc != "ac" && source == "MFLI" {
+            return Err("Zurich MFLI signal output supports AC sourcing only".into());
+        }
+        if exc == "delta" && !["K6220", "K6221"].contains(&source) {
+            return Err("Delta requires Keithley 6220 or 6221".into());
         }
         let limit = positive(&h["source"]["max_mA"], "Current limit", 105.)?;
         positive(&h["source"]["compliance_V"], "Voltage compliance", 105.)?;
@@ -145,7 +155,7 @@ impl Config {
         } else {
             tag(
                 &h["measure"]["lockin1"],
-                &["SR830", "AMETEK7230"],
+                &["SR830", "AMETEK7230", "MFLI"],
                 "lock-in",
             )?;
             positive(&m["tc_ms"], "Time constant", 30_000_000.)?;
@@ -320,7 +330,14 @@ impl Config {
             if d.address.trim().is_empty() {
                 return Err("Device address is required".into());
             }
+            let shared_mfli = d.role == "lockin1"
+                && d.model == "MFLI"
+                && h["source"]["model"] == "MFLI"
+                && d.address.trim().eq_ignore_ascii_case(
+                    h["source"]["address"].as_str().unwrap_or("").trim(),
+                );
             if d.connection.as_deref() != Some("delta")
+                && !shared_mfli
                 && !seen.insert(d.address.trim().to_uppercase())
             {
                 return Err("Devices share an address".into());
@@ -411,6 +428,8 @@ mod migration_tests {
                 "*IDN?" => {
                     if self.d.model == "SR830" {
                         "Stanford,SR830,123,1".into()
+                    } else if self.d.model == "MFLI" {
+                        "Zurich Instruments,MFLI,DEV1234,LabOne".into()
                     } else {
                         format!(
                             "MANUFACTURER,MODEL {},123,1",
@@ -436,13 +455,14 @@ mod migration_tests {
                 "SOUR:DELT:NVPR?" => "1".into(),
                 "SYST:COMM:SER:ENT?" => "KEITHLEY,MODEL 2182A,456,1".into(),
                 "LIAS? 3" => u8::from(b.unlock).to_string(),
+                "LOCKED?" => u8::from(!b.unlock).to_string(),
                 "FREQ?" | "FRQ." => b.reference.to_string(),
                 "ID" => "7230".into(),
-                "TC." => "0.1".into(),
+                "TC." | "TC?" => "0.1".into(),
                 "ST" => if b.unlock { "8" } else { "1" }.into(),
                 "IMODE" | "REFMODE" => "0".into(),
-                "VMODE" => "1".into(),
-                "SNAP? 1,2" | "XY." => format!(
+                "VMODE" | "SIGIN:ON?" | "DEMOD:ENABLE?" => "1".into(),
+                "SNAP? 1,2" | "XY." | "XY?" => format!(
                     "{},0",
                     b.current * 2. / if b.field { 2f64.sqrt() } else { 1. }
                 ),
@@ -578,6 +598,28 @@ mod migration_tests {
         assert!(b.commands.contains(&("lockin1".into(), "TC 12".into())));
         assert!(b.commands.contains(&("lockin1".into(), "IE 1".into())));
         assert!(!b.commands.iter().any(|(_, c)| c.starts_with("FMOD")));
+    }
+    #[test]
+    fn mfli_lockin_and_shared_source_acquisition() {
+        let b = bench();
+        b.lock().unwrap().reference = 1.2;
+        let mut p = sweep("MFLI");
+        p["hardware"]["measure"]["lockin1_addr"] = json!("127.0.0.1:8004/dev1234");
+        let (r, _) = exercise(p, b.clone());
+        r.unwrap();
+        off(&b);
+        assert!(b
+            .lock()
+            .unwrap()
+            .commands
+            .contains(&("lockin1".into(), "EXTREF:ENABLE 1".into())));
+        let mut p = project();
+        p["method"] = json!({"kind":"chirp","tc_ms":100,"lock_timeout_s":1,"carrier_hz":700,"levels_mA":[1],"rot_hz":1.2,"cycles":1,"mask_s":0.1,"direction":"cw"});
+        p["hardware"]["source"] = json!({"model":"MFLI","address":"dev1234","max_mA":10,"compliance_V":10});
+        p["hardware"]["measure"] = json!({"lockin1":"MFLI","lockin1_addr":"dev1234"});
+        let b = bench();
+        exercise(p, b.clone()).0.unwrap();
+        off(&b);
     }
     #[test]
     fn chirp_measured_cycles_both_directions() {
@@ -1229,7 +1271,7 @@ impl<'a> Runtime<'a> {
         if let Err(e) = self.mw("STOP1") {
             errors.push(e);
         }
-        for c in if self.c.h["source"]["model"] == "K6221" {
+        for c in if ["K6221", "MFLI"].contains(&self.c.h["source"]["model"].as_str().unwrap_or("")) {
             vec!["SOUR:SWE:ABOR", "SOUR:WAVE:ABOR", "OUTP OFF"]
         } else {
             vec!["SOUR:SWE:ABOR", "OUTP OFF"]
@@ -1428,7 +1470,7 @@ impl<'a> Runtime<'a> {
     }
     fn output_off(&mut self) -> R<()> {
         self.sw("SOUR:SWE:ABOR")?;
-        if self.c.h["source"]["model"] == "K6221" {
+        if ["K6221", "MFLI"].contains(&self.c.h["source"]["model"].as_str().unwrap_or("")) {
             self.sw("SOUR:WAVE:ABOR")?;
         }
         self.sw("OUTP OFF")

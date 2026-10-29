@@ -1,0 +1,44 @@
+{
+  "format": "halbach-hall-preset",
+  "version": 1,
+  "name": "AC field · Sideband AC current (Keithley 6221 + MFLI)",
+  "method": {
+    "kind": "rotating",
+    "tc_ms": 100,
+    "lock_timeout_s": 30,
+    "rotating": {
+      "excitation": "ac",
+      "I_mA": 1,
+      "rot_hz": 0.2,
+      "carrier_hz": 700,
+      "sideband": "lower",
+      "duration_s": 60,
+      "background": true
+    }
+  },
+  "hardware": {
+    "backend": "real",
+    "temperature": "off",
+    "magnet": {
+      "rotator": "OWISPS10",
+      "rotator_addr": "COM3",
+      "baud": 9600,
+      "counts_per_turn": 4000,
+      "velocity_scale": 1,
+      "encoder": "",
+      "angle_offset_deg": 0,
+      "dir_sign": 1
+    },
+    "source": {
+      "model": "K6221",
+      "address": "GPIB0::13::INSTR",
+      "compliance_V": 10,
+      "max_mA": 10
+    },
+    "measure": {
+      "lockin1": "MFLI",
+      "lockin1_addr": "127.0.0.1:8004/dev1234"
+    }
+  }
+}
+

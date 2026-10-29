@@ -1,0 +1,44 @@
+{
+  "format": "halbach-hall-preset",
+  "version": 1,
+  "name": "DC field · Steps · DC current (Keithley 6221 + 2182A delta)",
+  "method": {
+    "kind": "fixed",
+    "tc_ms": 100,
+    "lock_timeout_s": 30,
+    "fixed": {
+      "excitation": "dc",
+      "acq": "step",
+      "I_mA": 1,
+      "nplc": 1,
+      "n_angles": 36,
+      "settle_s": 2,
+      "reverse": true
+    }
+  },
+  "hardware": {
+    "backend": "real",
+    "temperature": "off",
+    "magnet": {
+      "rotator": "OWISPS10",
+      "rotator_addr": "COM3",
+      "baud": 9600,
+      "counts_per_turn": 4000,
+      "velocity_scale": 1,
+      "encoder": "",
+      "angle_offset_deg": 0,
+      "dir_sign": 1
+    },
+    "source": {
+      "model": "K6221",
+      "address": "GPIB0::13::INSTR",
+      "compliance_V": 10,
+      "max_mA": 10
+    },
+    "measure": {
+      "dc_mode": "delta",
+      "volt": "K2182A",
+      "volt_addr": ""
+    }
+  }
+}

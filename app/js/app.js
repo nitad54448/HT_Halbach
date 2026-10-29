@@ -174,9 +174,11 @@
     const av = HH.availability(h), ok = Object.entries(av).filter(([, a]) => a.ok).map(([k]) => HH.MODES[k].label);
     $('hw-summary').innerHTML = `<table>${lines.join('')}</table><div class="notice ${ok.length ? 'ok' : ''}" style="margin-top:12px">${ok.length ? 'Modes available: ' + esc(ok.join('; ')) : 'No measurement mode is available yet. Declare a current source, a rotation controller, a position detector and a nanovoltmeter or lock-in.'}</div>`;
     const warn = [];
-    if (h.measure.lockin1 === 'SR830' && h.measure.lockin2 === 'SR830' && h.measure.lockin1_addr && h.measure.lockin1_addr === h.measure.lockin2_addr) warn.push('Two SR830s share the same address.');
+    if (['SR830', 'AMETEK7230', 'MFLI'].includes(h.measure.lockin1) && h.measure.lockin1 === h.measure.lockin2 && h.measure.lockin1_addr && h.measure.lockin1_addr.trim().toUpperCase() === h.measure.lockin2_addr.trim().toUpperCase()) warn.push(`Two ${HH.LOCKIN[h.measure.lockin1]}s share the same address.`);
     $('measure-msg').innerHTML = warn.map(x => `<div class="notice err">${esc(x)}</div>`).join('');
-    for(const k of ['lockin1','lockin2']) document.querySelector(`[data-bind="hardware.measure.${k}_addr"]`).placeholder = h.measure[k]==='AMETEK7230' ? '192.168.1.100:50000' : 'GPIB0::8::INSTR';
+    for(const k of ['lockin1','lockin2']) document.querySelector(`[data-bind="hardware.measure.${k}_addr"]`).placeholder = h.measure[k]==='AMETEK7230' ? '192.168.1.100:50000' : h.measure[k]==='MFLI' ? 'dev1234 or 127.0.0.1:8004/dev1234' : 'GPIB0::8::INSTR';
+    document.querySelector('[data-bind="hardware.source.address"]').placeholder = h.source.model === 'MFLI' ? 'dev1234 or 127.0.0.1:8004/dev1234' : 'e.g. GPIB0::12::INSTR or IP';
+    if ([h.measure.lockin1,h.measure.lockin2,h.source.model].includes('MFLI')) $('measure-msg').innerHTML+='<p class="muted">Zurich Instruments MFLI: enter the LabOne device ID (e.g. dev1234) or Data Server endpoint host:8004/dev1234.</p>';
     if ([h.measure.lockin1,h.measure.lockin2].includes('AMETEK7230')) $('measure-msg').innerHTML+='<p class="muted">Ametek 7230: enter the Ethernet host/IP or host:50000.</p>';
     setBadges();
     $('connection-results').innerHTML = connectionCheck && connectionCheck.key === connectionKey()
@@ -297,8 +299,8 @@
     const f = m.fixed, show = (el, on) => { el.hidden = !on; };
     document.querySelectorAll('#mp-fixed [data-when]').forEach(el => show(el, { ac: f.excitation === 'ac', dc: f.excitation === 'dc' && !HH.isDelta(P), volt: HH.usesVoltmeter(m), step: f.acq === 'step', scan: f.acq === 'scan' }[el.dataset.when]));
     document.querySelectorAll('#mp-rotating [data-when]').forEach(el => show(el, el.dataset.when === m.rotating.excitation));
-    const parameterErrors=m.kind?HH.modeErrors(P):[];
-    $('experiment-msg').innerHTML=parameterErrors.map(x=>`<div class="notice err">${esc(x)}</div>`).join('');
+    const parameterErrors=m.kind?HH.modeErrors(P):[], parameterWarnings=m.kind?HH.modeWarnings(P):[];
+    $('experiment-msg').innerHTML=parameterErrors.map(x=>`<div class="notice err">${esc(x)}</div>`).join('')+parameterWarnings.map(x=>`<div class="notice">${esc(x)}</div>`).join('');
     const e = HH.principleErrors(m), w = [];
     $('mode-msg').innerHTML = (m.kind ? '' : '<div class="notice">Select a mode.</div>') + e.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + w.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
       (m.kind && !e.length ? '<div class="notice ok">Select compatible devices next. Set numerical parameters in Experiment setup.</div>' : '');
@@ -323,7 +325,7 @@
     if (sel.selectedOptions[0]?.disabled) sel.value = 'measure';
     $('add-sweep').disabled = running || P.hardware.temperature !== 'control';
     const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'tol', 'mean_tol', 'window_s', 'timeout_s'], soak: ['seconds'], measure: ['label'], heater_off: [] };
-    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', tol: 'Tol ±K', mean_tol: 'Mean |?T| (K)', window_s: 'Window (s)', timeout_s: 'Timeout (s)', seconds: 'Seconds', label: 'Label' };
+    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', tol: 'Tol ±K', mean_tol: 'Mean |ΔT| (K)', window_s: 'Window (s)', timeout_s: 'Timeout (s)', seconds: 'Seconds', label: 'Label' };
     t.innerHTML = '<tr><th>#</th><th>Step</th><th>Parameters</th><th></th></tr>';
     P.tempProgram.forEach((s, i) => {
       const tr = t.insertRow(); tr.insertCell().textContent = i + 1; tr.insertCell().textContent = HH.STEP_TYPES[s.type].label;
@@ -405,8 +407,8 @@
     const h=P.hardware,e=[];
     if (location.protocol==='file:') e.push('Open the UI through Live Server or GitHub Pages and start the local Rust service.');
     if (!(h.magnet.counts_per_turn>0) || !(h.magnet.velocity_scale>0)) e.push('Configure calibrated OWIS counts per revolution and velocity conversion on Devices.');
-    if (!['K6220','K6221'].includes(h.source.model)) e.push('Real acquisition currently supports Keithley 6220/6221 sources.');
-    if (!HH.usesVoltmeter(P.method) && !['SR830','AMETEK7230'].includes(h.measure.lockin1)) e.push('Select SR830 or Ametek 7230 as Lock-in 1 for real acquisition.');
+    if (!['K6220','K6221','MFLI'].includes(h.source.model)) e.push('Real acquisition currently supports Keithley 6220/6221 or Zurich MFLI sources.');
+    if (!HH.usesVoltmeter(P.method) && !['SR830','AMETEK7230','MFLI'].includes(h.measure.lockin1)) e.push('Select SR830, Ametek 7230, or Zurich MFLI as Lock-in 1 for real acquisition.');
     if (h.measure.lockin2) e.push('Real acquisition currently records one lock-in; deselect Lock-in 2.');
     return e;
   }
@@ -465,7 +467,7 @@
     const env = {
       pollSec: 2, now: () => vnow,
       sleep: async s => { simDev.advance(s); vnow += s; if (speed > 0) await sleepReal(s * 1000 / speed); else if (Math.round(vnow) % 20 === 0) await sleepReal(0); },
-      onTemp: s => { if (s.stability) $('r-stability').textContent = `Temperature stability: |?T| ${fx(s.stability.error)} K; mean |?T| ${s.stability.meanError === null ? 'collecting window' : fx(s.stability.meanError) + ' K'}; in band ${fx(s.stability.stableFor)} s`; trace.t.push(s.t); trace.T.push(s.T); trace.sp.push(s.setpoint); updateKpis(s); drawTemp(); },
+      onTemp: s => { if (s.stability) $('r-stability').textContent = `Temperature stability: |ΔT| ${fx(s.stability.error)} K; mean |ΔT| ${s.stability.meanError === null ? 'collecting window' : fx(s.stability.meanError) + ' K'}; in band ${fx(s.stability.stableFor)} s`; trace.t.push(s.t); trace.T.push(s.T); trace.sp.push(s.setpoint); updateKpis(s); drawTemp(); },
       onStep: (i, s, st) => { stepState[i] = st; $('r-prog').style.width = ((st === 'done' ? i + 1 : i) / total * 100) + '%'; setStatus(`Step ${i + 1}/${total}: ${HH.STEP_TYPES[s.type].label}`); hist(P, 'run', `Step ${i + 1} ${st}: ${s.type}`); renderRun(); },
       measure: ctx => measure(ctx, speed),
     };
@@ -651,7 +653,7 @@
   function modeRows(row) {
     const m = P.method, md = HH.MODES[m.kind]; if (!md) return row('Mode', 'unknown');
     const r = [row('Mode', md.label + ' (' + md.ref + ')')];
-    if (m.kind === 'chirp') r.push(row('Carrier', m.carrier_hz + ' Hz'), row('Current levels (RMS)', m.levels_mA.join(', ') + ' mA'), row('Rotation', m.rot_hz + ' Hz, ' + m.direction), row('Dwell / mask', m.dwell_s + ' s / ' + m.mask_s + ' s'));
+    if (m.kind === 'chirp') r.push(row('Carrier', m.carrier_hz + ' Hz'), row('Current levels (RMS)', m.levels_mA.join(', ') + ' mA'), row('Rotation', m.rot_hz + ' Hz, ' + m.direction), row('Cycles / dwell / mask', m.cycles + ' cycles (' + fx(HH.chirpDwell(m), 3) + ' s) / ' + m.mask_s + ' s'));
     else for (const [k, v] of Object.entries(m[m.kind])) r.push(row(k, v));
     return r.join('');
   }

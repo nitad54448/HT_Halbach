@@ -8,7 +8,7 @@
 <body>
 <header>
   <div class="brand"><strong>Halbach Hall workstation</strong> <small>· Hall effect, rotating Halbach field</small></div>
-  <div class="actions"><span class="badge sim" id="b-mode">Test mode ? simulated devices</span><span class="badge" id="b-ls">Temp: not connected</span><span class="badge" id="b-run">Idle</span></div>
+  <div class="actions"><span class="badge sim" id="b-mode">Test mode · simulated devices</span><span class="badge" id="b-ls">Temp: not connected</span><span class="badge" id="b-run">Idle</span></div>
 </header>
 <nav class="tabs" id="tabs" role="tablist"></nav>
 <main>
@@ -66,7 +66,7 @@
       <div class="field"><label>DC voltage acquisition</label><select data-bind="hardware.measure.dc_mode"><option value="independent">Independent nanovoltmeter</option><option value="delta">Source-linked delta mode</option></select></div><div class="field"><label>Nanovoltmeter (DC)</label><select data-bind="hardware.measure.volt" data-opts="VOLT"></select></div>
       <div class="field"><label>Address</label><input data-bind="hardware.measure.volt_addr"></div><div></div>
       <div class="field"><label>Lock-in 1</label><select data-bind="hardware.measure.lockin1" data-opts="LOCKIN"></select></div>
-      <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin1_addr"><small>Two SR830s must have distinct GPIB addresses.</small></div><div></div>
+      <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin1_addr"><small>Use VISA address (SR830), host:50000 (Ametek 7230), or LabOne devXXXX / host:8004/devXXXX (Zurich MFLI).</small></div><div></div>
       <div class="field"><label>Lock-in 2 (optional)</label><select data-bind="hardware.measure.lockin2" data-opts="LOCKIN"></select></div>
       <div class="field"><label>Address</label><input data-bind="hardware.measure.lockin2_addr"></div><div></div>
     </div><div id="measure-msg" style="margin-top:10px"></div><button class="secondary" id="check-reference">Wait for TTL Ref In lock</button><small id="reference-result" role="status">For a live TTL signal; does not start the motor.</small></div>
@@ -76,7 +76,7 @@
 </section>
 
 <section class="page" id="p-mode" data-title="Mode">
-  <p class="intro">Choose the method first: DC field with steps or scans, AC field with DC or AC current (sideband detection), or CHIRP. You can also load a preset method defined in JSON funtion. Select compatible devices on the next tab.</p>
+  <p class="intro">Choose the method first: DC field with steps or scans, AC field with DC or AC current (sideband detection), or CHIRP. You can also load a preset method defined in JSON. Select compatible devices on the next tab.</p>
   <div class="grid method-choices" id="mode-cards"></div>
   <input id="preset-file" type="file" accept=".json,application/json" hidden>
   <div id="mode-msg" style="margin-top:16px"></div>
@@ -103,7 +103,7 @@
 </section>
 
 <section class="page" id="p-temp" data-title="Temperature program">
-  <h1>Experiment setup</h1><p class="intro">Set measurement parameters here. During acquisition, apply changes for the next measurement; the current measurement keeps its original settings.</p><div class="actions"><button class="primary" id="apply-parameters">Apply parameters</button><span id="parameter-status" role="status"></span></div><div id="experiment-msg"></div><div class="card">      <div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div>
+  <h1>Experiment setup</h1><p class="intro">Set measurement parameters here. During acquisition, apply changes for the next measurement; the current measurement keeps its original settings.</p><div class="actions"><button class="primary" id="apply-parameters">Apply parameters</button><span id="parameter-status" role="status"></span></div><div id="experiment-msg"></div><div class="card"><div class="grid g2"><div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div><div class="field"><label>TTL reference lock timeout (s)</label><input type="number" min="0.1" max="600" step="any" data-bind="method.lock_timeout_s" data-num><small>Timeout for locking to the external Ref In signal across lock-in modes.</small></div></div>
 </div>
   <div class="card mode-panel" id="mp-chirp" hidden><h2>CHIRP parameters</h2><div class="grid g3">
       <div class="field"><label>Carrier frequency (Hz)</label><input type="number" data-bind="method.carrier_hz" data-num><small>Guide range 500-900 Hz.</small></div>
@@ -123,7 +123,7 @@
       <div class="field" data-when="dc"><label>Reverse DC current at each angle</label><select data-bind="method.fixed.reverse" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
   </div></div>
   <div class="card mode-panel" id="mp-rotating" hidden><h2>Rotating field parameters</h2><div class="grid g3">
-      <div class="field"><label>TTL reference lock timeout (s)</label><input type="number" min="0.1" max="600" step="any" data-bind="method.lock_timeout_s" data-num><small>Timeout for locking to the external Ref In signal.</small></div>
+      <!-- shared lock_timeout_s is in the lock-in card above -->
       <div class="field" data-when="ac"><label>AC current RMS (mA)</label><input type="number" step="any" data-bind="method.rotating.I_mA" data-num></div>
       <div class="field" data-when="dc"><label>DC currents (mA, comma-separated)</label><input id="f-dc-currents"><small>For example −5, −2.5, 0, 2.5, 5. The Hall voltage/current slope determines the Hall coefficient; no separate zero-current background is needed.</small></div>
       <div class="field"><label>Rotation frequency (Hz)</label><input type="number" min="0.001" max="1.2" step="any" data-bind="method.rotating.rot_hz" data-num></div>
@@ -133,13 +133,13 @@
       <div class="field" data-when="ac"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
   </div></div>
 <h2>Temperature program</h2>
-  <p class="intro">Build a temperature program from a start, end and positive step size (cooling sweeps are supported). Each point ramps, waits for stability, then measures using the selected measurement mode. ?T means measured temperature minus target: every reading must stay within the instantaneous limit for the entire window, and the time-averaged |?T| must meet the mean limit. A timeout or abort switches the heater off. An end point is included only when reached by a whole step.</p>
+  <p class="intro">Build a temperature program from a start, end and positive step size (cooling sweeps are supported). Each point ramps, waits for stability, then measures using the selected measurement mode. ΔT means measured temperature minus target: every reading must stay within the instantaneous limit for the entire window, and the time-averaged |ΔT| must meet the mean limit. A timeout or abort switches the heater off. An end point is included only when reached by a whole step.</p>
   <div class="card"><div class="toolbar">
     <div class="field"><label>Add step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add</button>
     <span style="width:24px"></span>
     <div class="field"><label>Sweep from (K)</label><input id="sw0" type="number" value="300"></div><div class="field"><label>to (K)</label><input id="sw1" type="number" value="320"></div><div class="field"><label>step (K)</label><input id="swd" type="number" value="10"></div>
-    <div class="field"><label>rate (K/min)</label><input id="swr" type="number" value="5"></div><div class="field"><label for="sw-tol">Maximum |?T| (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
-    <div class="field"><label for="sw-mean">Mean |?T| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
+    <div class="field"><label>rate (K/min)</label><input id="swr" type="number" value="5"></div><div class="field"><label for="sw-tol">Maximum |ΔT| (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
+    <div class="field"><label for="sw-mean">Mean |ΔT| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
     <div class="field"><label for="sw-window">Stability window (s)</label><input id="sw-window" type="number" min="1" value="60"></div>
     <div class="field"><label for="sw-timeout">Timeout per point (s)</label><input id="sw-timeout" type="number" min="1" value="3600"></div>
     <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>

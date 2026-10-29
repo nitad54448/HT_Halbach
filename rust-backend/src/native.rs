@@ -1,4 +1,4 @@
-use crate::protocol::{AmetekTcp, Device, Hardware, Session, R};
+use crate::protocol::{mfli_endpoint, AmetekTcp, Device, Hardware, Session, R};
 use serde_json::Value;
 
 #[derive(Default)]
@@ -6,12 +6,31 @@ pub struct NativeHardware {
     #[cfg(windows)]
     visa: Option<std::sync::Arc<windows::VisaApi>>,
     #[cfg(windows)]
+    zi: Option<std::sync::Arc<windows::ZiApi>>,
+    #[cfg(windows)]
     daq: Option<windows::DaqTask>,
 }
 impl Hardware for NativeHardware {
     fn open(&mut self, d: &Device) -> R<Box<dyn Session>> {
         if d.model == "AMETEK7230" {
             return Ok(Box::new(AmetekTcp::connect(&d.address)?));
+        }
+        if d.model == "MFLI" {
+            let _ = mfli_endpoint(&d.address)?;
+            #[cfg(windows)]
+            {
+                if self.zi.is_none() {
+                    self.zi = Some(std::sync::Arc::new(windows::ZiApi::new()?));
+                }
+                return Ok(Box::new(windows::ZiSession::open(
+                    self.zi.as_ref().unwrap().clone(),
+                    d,
+                )?));
+            }
+            #[cfg(not(windows))]
+            {
+                return Err("LabOne ziAPI requires Windows with installed LabOne C API".into());
+            }
         }
         #[cfg(windows)]
         {
@@ -421,6 +440,280 @@ mod windows {
         fn drop(&mut self) {
             unsafe {
                 (self.clear)(self.handle as Task);
+            }
+        }
+    }
+
+    type ZiConn = *mut c_void;
+    type ZiInit = unsafe extern "C" fn(*mut ZiConn) -> i32;
+    type ZiDestroy = unsafe extern "C" fn(ZiConn) -> i32;
+    type ZiConnectEx = unsafe extern "C" fn(ZiConn, *const c_char, u16, u32, *const c_char) -> i32;
+    type ZiDisconnect = unsafe extern "C" fn(ZiConn) -> i32;
+    type ZiGetDemod = unsafe extern "C" fn(ZiConn, *const c_char, *mut ZiDemodSample) -> i32;
+    type ZiGetDouble = unsafe extern "C" fn(ZiConn, *const c_char, *mut f64) -> i32;
+    type ZiSetDouble = unsafe extern "C" fn(ZiConn, *const c_char, f64) -> i32;
+    type ZiGetInt = unsafe extern "C" fn(ZiConn, *const c_char, *mut i64) -> i32;
+    type ZiSetInt = unsafe extern "C" fn(ZiConn, *const c_char, i64) -> i32;
+    type ZiGetBytes =
+        unsafe extern "C" fn(ZiConn, *const c_char, *mut u8, *mut u32, u32) -> i32;
+    type ZiGetError = unsafe extern "C" fn(i32, *mut *const c_char, *mut i32) -> i32;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ZiDemodSample {
+        time_stamp: u64,
+        x: f64,
+        y: f64,
+        frequency: f64,
+        phase: f64,
+        dio_bits: u32,
+        trigger: u32,
+        aux_in0: f64,
+        aux_in1: f64,
+    }
+
+    pub struct ZiApi {
+        _lib: Library,
+        init: ZiInit,
+        destroy: ZiDestroy,
+        connect_ex: ZiConnectEx,
+        disconnect: ZiDisconnect,
+        get_demod: ZiGetDemod,
+        get_double: ZiGetDouble,
+        set_double: ZiSetDouble,
+        get_int: ZiGetInt,
+        set_int: ZiSetInt,
+        get_bytes: ZiGetBytes,
+        get_error: ZiGetError,
+    }
+    impl ZiApi {
+        pub fn new() -> R<Self> {
+            unsafe {
+                let candidates = if cfg!(target_pointer_width = "64") {
+                    &[
+                        "ziAPI-win64.dll",
+                        "LabOneAPI.dll",
+                        r"C:\Program Files\Zurich Instruments\LabOne\API\C\lib\ziAPI-win64.dll",
+                    ][..]
+                } else {
+                    &[
+                        "ziAPI-win32.dll",
+                        "LabOneAPI.dll",
+                        r"C:\Program Files (x86)\Zurich Instruments\LabOne\API\C\lib\ziAPI-win32.dll",
+                    ][..]
+                };
+                let mut last_err = String::new();
+                let mut loaded = None;
+                for name in candidates {
+                    match Library::new(name) {
+                        Ok(l) => {
+                            loaded = Some(l);
+                            break;
+                        }
+                        Err(e) => last_err = e,
+                    }
+                }
+                let lib = loaded.ok_or_else(|| {
+                    format!(
+                        "Cannot load Zurich Instruments LabOne C API (ziAPI-win64.dll). Install LabOne matching executable architecture: {last_err}"
+                    )
+                })?;
+                Ok(Self {
+                    init: symbol(&lib, b"ziAPIInit\0")?,
+                    destroy: symbol(&lib, b"ziAPIDestroy\0")?,
+                    connect_ex: symbol(&lib, b"ziAPIConnectEx\0")?,
+                    disconnect: symbol(&lib, b"ziAPIDisconnect\0")?,
+                    get_demod: symbol(&lib, b"ziAPIGetDemodSample\0")?,
+                    get_double: symbol(&lib, b"ziAPIGetValueD\0")?,
+                    set_double: symbol(&lib, b"ziAPISetValueD\0")?,
+                    get_int: symbol(&lib, b"ziAPIGetValueI\0")?,
+                    set_int: symbol(&lib, b"ziAPISetValueI\0")?,
+                    get_bytes: symbol(&lib, b"ziAPIGetValueB\0")?,
+                    get_error: symbol(&lib, b"ziAPIGetError\0")?,
+                    _lib: lib,
+                })
+            }
+        }
+        fn check(&self, code: i32) -> R<()> {
+            if code == 0 {
+                return Ok(());
+            }
+            unsafe {
+                let mut buf: *const c_char = std::ptr::null();
+                if (self.get_error)(code, &mut buf, std::ptr::null_mut()) == 0 && !buf.is_null() {
+                    let msg = std::ffi::CStr::from_ptr(buf).to_string_lossy();
+                    return Err(format!("LabOne error {code}: {msg}"));
+                }
+            }
+            Err(format!("LabOne error 0x{:08X}", code as u32))
+        }
+    }
+
+    pub struct ZiSession {
+        api: Arc<ZiApi>,
+        conn: usize,
+        dev: String,
+    }
+    impl ZiSession {
+        pub fn open(api: Arc<ZiApi>, d: &Device) -> R<Self> {
+            let (host, port, dev) = mfli_endpoint(&d.address)?;
+            let mut conn: ZiConn = std::ptr::null_mut();
+            unsafe {
+                api.check((api.init)(&mut conn))?;
+            }
+            let s = Self {
+                api,
+                conn: conn as usize,
+                dev,
+            };
+            let host_c = cstring(&host)?;
+            unsafe {
+                s.api.check((s.api.connect_ex)(
+                    s.conn as ZiConn,
+                    host_c.as_ptr(),
+                    port,
+                    6,
+                    std::ptr::null(),
+                ))?;
+            }
+            Ok(s)
+        }
+        fn path(&self, suffix: &str) -> R<CString> {
+            cstring(&format!("/{}/{suffix}", self.dev))
+        }
+        fn get_d(&self, suffix: &str) -> R<f64> {
+            let p = self.path(suffix)?;
+            let mut v = 0.;
+            unsafe {
+                self.api
+                    .check((self.api.get_double)(self.conn as ZiConn, p.as_ptr(), &mut v))?;
+            }
+            number(&v.to_string())
+        }
+        fn set_d(&self, suffix: &str, v: f64) -> R<()> {
+            let p = self.path(suffix)?;
+            unsafe {
+                self.api
+                    .check((self.api.set_double)(self.conn as ZiConn, p.as_ptr(), v))
+            }
+        }
+        fn get_i(&self, suffix: &str) -> R<i64> {
+            let p = self.path(suffix)?;
+            let mut v = 0i64;
+            unsafe {
+                self.api
+                    .check((self.api.get_int)(self.conn as ZiConn, p.as_ptr(), &mut v))?;
+            }
+            Ok(v)
+        }
+        fn set_i(&self, suffix: &str, v: i64) -> R<()> {
+            let p = self.path(suffix)?;
+            unsafe {
+                self.api
+                    .check((self.api.set_int)(self.conn as ZiConn, p.as_ptr(), v))
+            }
+        }
+        fn get_s(&self, suffix: &str) -> R<String> {
+            let p = self.path(suffix)?;
+            let mut b = [0u8; 256];
+            let mut len = 0u32;
+            unsafe {
+                self.api.check((self.api.get_bytes)(
+                    self.conn as ZiConn,
+                    p.as_ptr(),
+                    b.as_mut_ptr(),
+                    &mut len,
+                    b.len() as u32,
+                ))?;
+            }
+            let end = b[..(len as usize).min(b.len())]
+                .iter()
+                .position(|x| *x == 0)
+                .unwrap_or((len as usize).min(b.len()));
+            Ok(String::from_utf8_lossy(&b[..end]).trim().into())
+        }
+        fn sample(&self) -> R<ZiDemodSample> {
+            let p = self.path("demods/0/sample")?;
+            let mut s = ZiDemodSample::default();
+            unsafe {
+                self.api
+                    .check((self.api.get_demod)(self.conn as ZiConn, p.as_ptr(), &mut s))?;
+            }
+            number(&s.x.to_string())?;
+            number(&s.y.to_string())?;
+            number(&s.frequency.to_string())?;
+            Ok(s)
+        }
+    }
+    impl Session for ZiSession {
+        fn write(&mut self, c: &str) -> R<()> {
+            if let Some(v) = c.strip_prefix("TC ") {
+                return self.set_d("demods/0/tc", number(v)?);
+            }
+            if let Some(v) = c.strip_prefix("SOUR:WAVE:AMPL ") {
+                let amp = number(v)?;
+                self.set_i("sigouts/0/enables/0", 1)?;
+                return self.set_d("sigouts/0/amplitudes/0", amp);
+            }
+            if let Some(v) = c.strip_prefix("SOUR:WAVE:FREQ ") {
+                return self.set_d("oscs/0/freq", number(v)?);
+            }
+            if c.starts_with("SOUR:CURR:COMP ") {
+                return Ok(());
+            }
+            match c {
+                "DEMOD:HARM 1" => self.set_i("demods/0/harmonic", 1),
+                "EXTREF:AUTOMODE 4" => self.set_i("extrefs/0/automode", 4),
+                "EXTREF:ENABLE 1" => self.set_i("extrefs/0/enable", 1),
+                "DEMOD:ENABLE 1" => self.set_i("demods/0/enable", 1),
+                "SIGIN:ON 1" => self.set_i("sigins/0/on", 1),
+                "DEMOD:ADC 0" => self.set_i("demods/0/adcselect", 0),
+                "OUTP OFF" | "SOUR:SWE:ABOR" | "SOUR:WAVE:ABOR" => {
+                    let _ = self.set_d("sigouts/0/amplitudes/0", 0.);
+                    self.set_i("sigouts/0/on", 0)
+                }
+                "SOUR:WAVE:FUNC SIN" | "SOUR:WAVE:OFFS 0" | "SOUR:WAVE:ARM" => Ok(()),
+                "SOUR:WAVE:INIT" | "OUTP ON" => self.set_i("sigouts/0/on", 1),
+                _ => Err(format!("Unsupported MFLI command: {c}")),
+            }
+        }
+        fn query(&mut self, c: &str) -> R<String> {
+            match c {
+                "*IDN?" => {
+                    let devtype = self
+                        .get_s("features/devtype")
+                        .unwrap_or_else(|_| "MFLI".into());
+                    if !devtype.to_uppercase().contains("MFLI") {
+                        return Err(format!("Expected MFLI, LabOne reported {devtype}"));
+                    }
+                    Ok(format!(
+                        "Zurich Instruments,{devtype},{},LabOne",
+                        self.dev.to_uppercase()
+                    ))
+                }
+                "TC?" => Ok(self.get_d("demods/0/tc")?.to_string()),
+                "LOCKED?" => Ok(self.get_i("extrefs/0/locked")?.to_string()),
+                "FREQ?" => Ok(self.sample()?.frequency.to_string()),
+                "XY?" => {
+                    let s = self.sample()?;
+                    Ok(format!("{},{}", s.x, s.y))
+                }
+                "SIGIN:ON?" => Ok(self.get_i("sigins/0/on")?.to_string()),
+                "DEMOD:ENABLE?" => Ok(self.get_i("demods/0/enable")?.to_string()),
+                "SYST:ERR?" => Ok("0,No error".into()),
+                "STAT:MEAS?" | "STAT:MEAS:COND?" => {
+                    let over = self.get_i("sigouts/0/over").unwrap_or(0);
+                    Ok(if over != 0 { "8" } else { "0" }.into())
+                }
+                _ => Err(format!("Unsupported MFLI query: {c}")),
+            }
+        }
+    }
+    impl Drop for ZiSession {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = (self.api.disconnect)(self.conn as ZiConn);
+                let _ = (self.api.destroy)(self.conn as ZiConn);
             }
         }
     }

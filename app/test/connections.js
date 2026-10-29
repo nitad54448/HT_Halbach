@@ -31,6 +31,13 @@ const C = require('../js/connections.js');
   assert(C.connectionErrors(p).some(e => /lock-in/.test(e)));
   Object.assign(h.measure, { lockin1: 'SR830', lockin1_addr: 'GPIB0::8::INSTR' });
   assert.deepStrictEqual(C.connectionErrors(p), []);
+  p.method.rotating.excitation = 'ac';
+  Object.assign(h.source, { model: 'MFLI', address: 'dev1234' });
+  Object.assign(h.measure, { lockin1: 'MFLI', lockin1_addr: 'dev1234' });
+  assert.deepStrictEqual(C.connectionErrors(p), [], 'MFLI source and Lock-in 1 can share the same LabOne device ID');
+  Object.assign(h.source, { model: 'K6221', address: 'GPIB0::13::INSTR' });
+  Object.assign(h.measure, { lockin1: 'SR830', lockin1_addr: 'GPIB0::8::INSTR' });
+  p.method.rotating.excitation = 'dc';
   h.backend = 'real';
   let requests = [];
   const encoderOffline = { checkDevice: async d => {

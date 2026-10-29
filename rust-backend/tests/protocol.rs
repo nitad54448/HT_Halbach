@@ -22,4 +22,17 @@ fn endpoints() {
         assert_eq!(ametek_endpoint(s).unwrap(), ("192.168.1.2".into(), 50000));
     }
     assert!(ametek_endpoint("GPIB0::8::INSTR").is_err());
+    for s in [
+        "dev1234",
+        "DEV1234:8004",
+        "127.0.0.1/dev1234",
+        "127.0.0.1:8004/dev1234",
+        "TCPIP0::127.0.0.1/dev1234::8004::SOCKET",
+    ] {
+        assert_eq!(
+            mfli_endpoint(s).unwrap(),
+            ("127.0.0.1".into(), 8004, "dev1234".into())
+        );
+    }
+    assert!(mfli_endpoint("GPIB0::8::INSTR").is_err());
 }

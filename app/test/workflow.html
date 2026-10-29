@@ -56,6 +56,12 @@ document.getElementById('app').addEventListener('load', async () => {
     await preset('chirp');
     assert(w.HH.debugState().P.method.rot_hz===1.2&&w.HH.debugState().P.method.cycles===6,'CHIRP preset uses maximum speed and cycle count');
     assert(!d.getElementById('next').disabled,'Valid CHIRP parameters unlock Devices');
+    d.getElementById('next').click();
+    change(d.querySelector('[data-bind="hardware.source.model"]'),'MFLI');
+    change(d.querySelector('[data-bind="hardware.source.address"]'),'dev1234');
+    change(d.querySelector('[data-bind="hardware.measure.lockin1"]'),'MFLI');
+    change(d.querySelector('[data-bind="hardware.measure.lockin1_addr"]'),'dev1234');
+    assert(!d.getElementById('check-connections').disabled,'MFLI source and Lock-in 1 can share a LabOne device ID');
     await preset('dc-delta');
     const p=w.HH.debugState().P;
     p.hardware.magnet.counts_per_turn=4000;p.hardware.magnet.velocity_scale=1;p.tempProgram=[w.HH.makeStep('measure')];

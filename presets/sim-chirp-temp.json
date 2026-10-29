@@ -1,0 +1,51 @@
+{
+  "format": "halbach-hall-preset",
+  "version": 1,
+  "name": "Simulation · CHIRP + Lake Shore 335 temperature control",
+  "method": {
+    "kind": "chirp",
+    "tc_ms": 100,
+    "lock_timeout_s": 30,
+    "carrier_hz": 700,
+    "levels_mA": [0.5, 1, 2],
+    "rot_hz": 0.2,
+    "cycles": 4,
+    "mask_s": 3,
+    "direction": "both"
+  },
+  "hardware": {
+    "backend": "simulation",
+    "temperature": "control",
+    "tempController": {
+      "model": "LS335",
+      "address": "GPIB0::12::INSTR",
+      "input": "A",
+      "loop": 1,
+      "maxK": 400,
+      "maxRateKmin": 10
+    },
+    "magnet": {
+      "rotator": "OWISPS10",
+      "rotator_addr": "SIM::ROTATOR",
+      "baud": 9600,
+      "counts_per_turn": 4000,
+      "velocity_scale": 1,
+      "encoder": "NI9361",
+      "encoder_addr": "SIM::ENCODER",
+      "host": "SIM::CHASSIS",
+      "encoder_ppr": 1024,
+      "angle_offset_deg": 0,
+      "dir_sign": 1
+    },
+    "source": {
+      "model": "K6221",
+      "address": "GPIB0::13::INSTR",
+      "compliance_V": 10,
+      "max_mA": 10
+    },
+    "measure": {
+      "lockin1": "MFLI",
+      "lockin1_addr": "127.0.0.1:8004/dev1234"
+    }
+  }
+}

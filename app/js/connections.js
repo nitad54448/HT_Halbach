@@ -32,7 +32,8 @@
       if (!d.address && d.positionSource !== 'optical') e.push(d.role + ': address/channel is required');
       const key = d.address.toUpperCase();
       if (key && !d.parent) {
-        if (seen.has(key)) e.push(d.role + ' and ' + seen.get(key) + ' share an address');
+        const sharedMfli = d.model === 'MFLI' && ((d.role.startsWith('lockin') && seen.get(key) === 'source' && p.hardware.source.model === 'MFLI') || (d.role === 'source' && String(seen.get(key)).startsWith('lockin')));
+        if (seen.has(key) && !sharedMfli) e.push(d.role + ' and ' + seen.get(key) + ' share an address');
         seen.set(key, d.role);
       }
     }

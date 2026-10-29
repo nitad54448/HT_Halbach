@@ -59,7 +59,10 @@ impl Model {
         }
     }
     pub fn supports_ac_current(self) -> bool {
-        matches!(self, Self::Keithley6221 | Self::LakeShore155Ac)
+        matches!(
+            self,
+            Self::Keithley6221 | Self::LakeShore155Ac | Self::ZurichMfli
+        )
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

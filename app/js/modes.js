@@ -88,7 +88,7 @@
       const r = m.rotating;
       if (!pos(r.rot_hz)) e.push('Rotation frequency must be > 0.');
       if (!pos(r.duration_s) || r.duration_s * r.rot_hz < 1) e.push('Acquire at least one full rotation (duration × rotation frequency ≥ 1).');
-      if (r.excitation === 'ac' && !pos(r.carrier_hz)) e.push('Carrier frequency must be > 0.');
+      if (r.excitation === 'ac') { if (!pos(r.carrier_hz)) e.push('Carrier frequency must be > 0.'); else if (r.carrier_hz <= r.rot_hz) e.push('Carrier frequency must exceed rotation frequency.'); }
     }
     return e;
   }

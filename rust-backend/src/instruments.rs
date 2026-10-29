@@ -15,6 +15,7 @@ pub fn model_matches(identity: &str, model: &str) -> bool {
         "LS332" => "332",
         "LS335" => "335",
         "LS155" => "155",
+        "MFLI" => "MFLI",
         _ => return false,
     };
     raw == expected
@@ -28,7 +29,7 @@ pub fn check(hw: &mut dyn Hardware, d: &Device) -> R<Value> {
         r["ok"] = json!(true);
         return Ok(r);
     }
-    if ["SR830", "AMETEK7230"].contains(&d.model.as_str()) {
+    if ["SR830", "AMETEK7230", "MFLI"].contains(&d.model.as_str()) && d.role.starts_with("lockin") {
         let id = open_lockin(hw, d)?.identify()?;
         return Ok(json!({"ok":true,"identity":id}));
     }
@@ -49,7 +50,7 @@ pub fn check(hw: &mut dyn Hardware, d: &Device) -> R<Value> {
         );
     }
     if ![
-        "K6220", "K6221", "K2182", "K2182A", "LS332", "LS335", "LS155",
+        "K6220", "K6221", "K2182", "K2182A", "LS332", "LS335", "LS155", "MFLI",
     ]
     .contains(&d.model.as_str())
     {
@@ -99,7 +100,7 @@ pub fn read(hw: &mut dyn Hardware, d: &Device) -> R<Value> {
         return check(hw, d);
     }
     check(hw, d)?;
-    if ["SR830", "AMETEK7230"].contains(&d.model.as_str()) {
+    if ["SR830", "AMETEK7230", "MFLI"].contains(&d.model.as_str()) {
         let (x, y) = open_lockin(hw, d)?.read_xy()?;
         return Ok(json!({"X":x,"Y":y}));
     }
