@@ -50,7 +50,7 @@
       hardware: {
         backend: 'real', temperature: 'off',
         tempController: { model: 'LS335', address: 'GPIB0::12::INSTR', input: 'A', loop: 1, maxK: 400, maxRateKmin: 10 },
-        magnet: { rotator: '', rotator_addr: '', baud: 9600, counts_per_turn: null, velocity_scale: null, encoder: '', encoder_addr: '', angle_offset_deg: 0, dir_sign: 1 },
+        magnet: { rotator: 'OWISPS10', rotator_addr: 'COM4', baud: 9600, unit: 1, axis: 1, term: 'crlf', counts_per_turn: 50000, velocity_scale: 1, encoder: '', encoder_addr: '', angle_offset_deg: 0, dir_sign: 1 },
         source: { model: '', address: '', compliance_V: 10, max_mA: 10 },
         measure: { volt: '', volt_addr: '', dc_mode: 'independent', lockin1: '', lockin1_addr: '', lockin2: '', lockin2_addr: '' },
       },

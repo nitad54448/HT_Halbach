@@ -73,7 +73,22 @@
 
   /* ---------------- Step programming ---------------- */
   const STEP_TYPES = {
-    goto: { label: 'Go to T and stabilise', defaults: { T: 300, rate: 5, range: 'medium', tol: 0.05, mean_tol: 0.02, window_s: 60, timeout_s: 3600 } },
+    goto: {
+      label: 'Go to T and stabilise',
+      defaults: {
+        T: 300,
+        rate: 5,
+        range: 'medium',
+        min_stab_s: 60,
+        max_stab_s: 3600,
+        avg_s: 30,
+        tol: 0.05,
+        esd_tol: 0.02,
+        window_s: 30,
+        timeout_s: 3600,
+        mean_tol: 0.02,
+      },
+    },
     soak: { label: 'Soak / wait', defaults: { seconds: 60 } },
     measure: { label: 'Run Hall measurement', defaults: { label: '' } },
     heater_off: { label: 'Heater off', defaults: {} },
@@ -101,9 +116,14 @@
         if (!(s.rate > 0 && s.rate <= L.maxRateKmin)) errs.push(w + `rate must be >0 and ≤ ${L.maxRateKmin} K/min`);
         if (!(s.range in RANGES) || s.range === 'off') errs.push(w + 'heater range must be low/medium/high');
         if (s.mean_tol !== undefined && !(Number.isFinite(s.mean_tol) && s.mean_tol > 0 && s.mean_tol <= s.tol)) errs.push(w + 'mean error limit must be > 0 and no greater than the instantaneous error limit');
+        if (s.esd_tol !== undefined && !(Number.isFinite(s.esd_tol) && s.esd_tol > 0)) errs.push(w + 'ESD tolerance must be > 0');
         if (!(Number.isFinite(s.tol) && s.tol > 0)) errs.push(w + 'tolerance must be > 0');
-        if (!(Number.isFinite(s.window_s) && s.window_s >= 1)) errs.push(w + 'stability window must be ≥ 1 s');
-        if (!(Number.isFinite(s.timeout_s) && s.timeout_s > s.window_s)) errs.push(w + 'timeout must exceed the stability window');
+        const avg = s.avg_s !== undefined ? s.avg_s : s.window_s;
+        const minStab = s.min_stab_s !== undefined ? s.min_stab_s : s.window_s;
+        const maxStab = s.max_stab_s !== undefined ? s.max_stab_s : s.timeout_s;
+        if (!(Number.isFinite(avg) && avg >= 1)) errs.push(w + 'averaging duration must be ≥ 1 s');
+        if (!(Number.isFinite(minStab) && minStab >= avg)) errs.push(w + 'minimum stabilization time must be ≥ averaging duration');
+        if (!(Number.isFinite(maxStab) && maxStab > minStab)) errs.push(w + 'maximum stabilization time must exceed minimum stabilization time');
       }
       if (s.type === 'soak' && !(s.seconds >= 0)) errs.push(w + 'seconds must be ≥ 0');
     });
@@ -115,34 +135,81 @@
   function estimateDuration(steps, T0) {
     let T = T0 || 300, tot = 0;
     for (const s of steps) {
-      if (s.type === 'goto') { tot += Math.abs(s.T - T) / s.rate * 60 + s.window_s; T = s.T; }
+      if (s.type === 'goto') {
+        const stabTime = s.min_stab_s !== undefined ? s.min_stab_s : (s.window_s || 60);
+        tot += Math.abs(s.T - T) / s.rate * 60 + stabTime;
+        T = s.T;
+      }
       else if (s.type === 'soak') tot += s.seconds;
     }
     return tot; // seconds, excluding measurement time
   }
 
-  // A continuous in-band window, using a time-weighted mean absolute error.
-  // Legacy steps without mean_tol retain their original instantaneous criterion.
+  // Stabilization tracker supporting window averaging, mean |ΔT|, and ESD σ_T
   class TemperatureStability {
-    constructor(step) { this.s = step; this.points = []; }
+    constructor(step) {
+      this.s = step;
+      this.inBandSince = null;
+      this.points = [];
+      this.avg_s = step.avg_s !== undefined ? step.avg_s : (step.window_s || 30);
+      this.min_stab_s = step.min_stab_s !== undefined ? step.min_stab_s : (step.window_s || 60);
+      this.max_stab_s = step.max_stab_s !== undefined ? step.max_stab_s : (step.timeout_s || 3600);
+      this.tol = step.tol || 0.05;
+      this.mean_tol = step.mean_tol !== undefined ? step.mean_tol : this.tol;
+      this.esd_tol = step.esd_tol !== undefined ? step.esd_tol : this.tol;
+    }
     update(t, T, ramping) {
       const s = this.s, error = Math.abs(T - s.T);
-      if (ramping || !Number.isFinite(T) || error > s.tol) this.points = [];
-      else this.points.push({ t, error });
-      const start = t - s.window_s;
-      while (this.points.length > 1 && this.points[1].t <= start) this.points.shift();
-      const covered = this.points.length > 1 && this.points[0].t <= start;
-      let integral = 0;
+      if (ramping || !Number.isFinite(T) || error > this.tol) {
+        this.inBandSince = null;
+        this.points = [];
+        return {
+          error,
+          meanError: null,
+          esdT: null,
+          stableFor: 0,
+          ramping,
+          covered: false,
+          stable: false,
+        };
+      }
+      if (this.inBandSince === null) this.inBandSince = t;
+      const stableFor = t - this.inBandSince;
+
+      this.points.push({ t, T, error });
+      const cutoff = t - this.avg_s;
+      while (this.points.length > 1 && this.points[1].t <= cutoff) this.points.shift();
+
+      const covered = this.points.length > 1 && this.points[0].t <= cutoff;
+      let meanError = null, esdT = null;
       if (covered) {
+        let integral = 0;
         for (let i = 1; i < this.points.length; i++) {
-          const a = this.points[i - 1], b = this.points[i], left = Math.max(start, a.t);
+          const a = this.points[i - 1], b = this.points[i], left = Math.max(cutoff, a.t);
           const eLeft = a.error + (b.error - a.error) * (left - a.t) / (b.t - a.t);
           integral += (eLeft + b.error) * (b.t - left) / 2;
         }
+        meanError = integral / this.avg_s;
+
+        const n = this.points.length;
+        const meanT = this.points.reduce((acc, p) => acc + p.T, 0) / n;
+        const variance = this.points.reduce((acc, p) => acc + Math.pow(p.T - meanT, 2), 0) / n;
+        esdT = Math.sqrt(variance);
       }
-      const meanError = covered ? integral / s.window_s : null;
-      return { error, meanError, stableFor: this.points.length ? Math.min(s.window_s, t - this.points[0].t) : 0,
-        stable: covered && meanError <= (s.mean_tol === undefined ? s.tol : s.mean_tol) };
+
+      const stable = !ramping && covered && stableFor >= this.min_stab_s &&
+        (meanError !== null && meanError <= this.mean_tol) &&
+        (esdT === null || esdT <= this.esd_tol);
+
+      return {
+        error,
+        meanError,
+        esdT,
+        stableFor,
+        ramping,
+        covered,
+        stable,
+      };
     }
   }
 

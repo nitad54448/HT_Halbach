@@ -273,7 +273,20 @@ impl Service {
                 "json" => "application/json",
                 _ => "application/octet-stream",
             };
-            Ok((std::fs::read(&file).map_err(|e| e.to_string())?, mime))
+            let mut content = std::fs::read(&file).map_err(|e| e.to_string())?;
+            // When serving the UI directly, inject the session token into index.html
+            // so the browser connects seamlessly without requiring manual token entry!
+            if relative == "index.html" || relative.ends_with(".html") {
+                if let Ok(html_str) = String::from_utf8(content.clone()) {
+                    let injection = format!(
+                        "<script>window.__HALBACH_EMBEDDED_TOKEN__ = \"{}\";</script>\n",
+                        self.token
+                    );
+                    let replaced = html_str.replace("<head>", &format!("<head>\n{}", injection));
+                    content = replaced.into_bytes();
+                }
+            }
+            Ok((content, mime))
         })();
         match result {
             Ok((body, mime)) => {

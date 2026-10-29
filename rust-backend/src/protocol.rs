@@ -43,6 +43,12 @@ pub struct Device {
     #[serde(default)]
     pub baud: Option<u32>,
     #[serde(default)]
+    pub unit: Option<u32>,
+    #[serde(default)]
+    pub axis: Option<u32>,
+    #[serde(default)]
+    pub term: Option<String>,
+    #[serde(default)]
     pub position_source: Option<String>,
     #[serde(default)]
     pub angle_type: Option<String>,
@@ -52,6 +58,10 @@ pub struct Device {
     pub pulses_per_rev: Option<u32>,
     #[serde(default)]
     pub counts_per_turn: Option<f64>,
+    #[serde(default)]
+    pub angle_offset_deg: Option<f64>,
+    #[serde(default)]
+    pub dir_sign: Option<f64>,
     #[serde(default)]
     pub connection: Option<String>,
     #[serde(default)]

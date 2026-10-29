@@ -98,6 +98,17 @@ impl Config {
             return Err("Direction must be +1 or -1".into());
         }
         num(&h["magnet"]["angle_offset_deg"])?;
+        if let Some(u) = h["magnet"].get("unit") {
+            whole(u, 1, 1, "OWIS control unit")?;
+        }
+        if let Some(a) = h["magnet"].get("axis") {
+            whole(a, 1, 9, "OWIS axis")?;
+        }
+        if let Some(t) = h["magnet"].get("term").and_then(Value::as_str) {
+            if !["crlf", "cr", "lf"].contains(&t.to_lowercase().as_str()) {
+                return Err("Invalid OWIS line termination".into());
+            }
+        }
         let source = tag(
             &h["source"]["model"],
             &["K6220", "K6221", "MFLI"],
@@ -246,11 +257,37 @@ impl Config {
                     )?;
                     let tol = positive(&s["tol"], "Tolerance", f64::MAX)?;
                     let mean = num(s.get("mean_tol").unwrap_or(&s["tol"]))?;
-                    if mean < 0. || mean > tol {
+                    if mean <= 0. || mean > tol {
                         return Err("Invalid mean temperature tolerance".into());
                     }
-                    positive(&s["window_s"], "Stability window", 86400.)?;
-                    positive(&s["timeout_s"], "Stability timeout", 86400.)?;
+                    let esd = num(s.get("esd_tol").unwrap_or(&s["tol"]))?;
+                    if esd <= 0. {
+                        return Err("Invalid ESD temperature tolerance".into());
+                    }
+                    let avg = positive(
+                        s.get("avg_s").unwrap_or(&s["window_s"]),
+                        "Averaging duration",
+                        86400.,
+                    )?;
+                    let min_stab = positive(
+                        s.get("min_stab_s").unwrap_or(&s["window_s"]),
+                        "Minimum stabilization time",
+                        86400.,
+                    )?;
+                    let max_stab = positive(
+                        s.get("max_stab_s").unwrap_or(&s["timeout_s"]),
+                        "Maximum stabilization time",
+                        86400.,
+                    )?;
+                    if min_stab < avg {
+                        return Err("Minimum stabilization time must be >= averaging duration".into());
+                    }
+                    if max_stab <= min_stab {
+                        return Err(
+                            "Maximum stabilization time must exceed minimum stabilization time"
+                                .into(),
+                        );
+                    }
                     tag(&s["range"], &["low", "medium", "high"], "heater range")?;
                 }
                 "heater_off" if temp != "control" => {
@@ -279,6 +316,12 @@ impl Config {
                 model: "OWISPS10".into(),
                 address: text(&h["magnet"]["rotator_addr"])?.into(),
                 baud: Some(h["magnet"]["baud"].as_u64().unwrap_or(9600) as u32),
+                unit: Some(h["magnet"]["unit"].as_u64().unwrap_or(1) as u32),
+                axis: Some(h["magnet"]["axis"].as_u64().unwrap_or(1) as u32),
+                term: h["magnet"]["term"].as_str().map(str::to_string),
+                counts_per_turn: num(&h["magnet"]["counts_per_turn"]).ok(),
+                angle_offset_deg: num(&h["magnet"]["angle_offset_deg"]).ok(),
+                dir_sign: num(&h["magnet"]["dir_sign"]).ok(),
                 ..Default::default()
             },
             Device {
@@ -288,18 +331,26 @@ impl Config {
                 ..Default::default()
             },
         ];
+        let is_delta_wiring = ["K6220", "K6221"].contains(&h["source"]["model"].as_str().unwrap_or(""))
+            && ["K2182", "K2182A"].contains(&h["measure"]["volt"].as_str().unwrap_or(""))
+            && (self.exc == "delta"
+                || h["measure"]["dc_mode"] == "delta"
+                || h["measure"]["volt_addr"].as_str().unwrap_or("").trim().is_empty()
+                || h["measure"]["volt_addr"].as_str().unwrap_or("").trim().eq_ignore_ascii_case(
+                    h["source"]["address"].as_str().unwrap_or("").trim(),
+                ));
         ds.push(if self.volt {
             Device {
                 role: "voltmeter".into(),
                 model: text(&h["measure"]["volt"])?.into(),
-                address: text(if self.exc == "delta" {
+                address: text(if is_delta_wiring {
                     &h["source"]["address"]
                 } else {
                     &h["measure"]["volt_addr"]
                 })?
                 .into(),
                 connection: Some(
-                    if self.exc == "delta" {
+                    if is_delta_wiring {
                         "delta"
                     } else {
                         "independent"
@@ -878,6 +929,13 @@ pub struct Status {
     pub errors: Vec<String>,
     pub temperature: Option<f64>,
     pub setpoint: Option<f64>,
+    pub current_ma: f64,
+    pub output_on: bool,
+    pub voltage_x: Option<f64>,
+    pub voltage_y: Option<f64>,
+    pub angle_deg: Option<f64>,
+    pub counter: Option<f64>,
+    pub temp_status: Option<Value>,
 }
 pub struct Job {
     pub id: String,
@@ -936,7 +994,7 @@ impl Job {
     pub fn status(&self, cursor: usize) -> Value {
         *self.heartbeat.lock().unwrap() = Instant::now();
         let s = self.state.lock().unwrap();
-        json!({"id":self.id,"state":s.state,"message":s.message,"step":s.step,"runs":s.runs.get(cursor..).unwrap_or(&[]),"count":s.runs.len(),"cleanupErrors":s.errors,"temperatureK":s.temperature,"setpointK":s.setpoint})
+        json!({"id":self.id,"state":s.state,"message":s.message,"step":s.step,"runs":s.runs.get(cursor..).unwrap_or(&[]),"count":s.runs.len(),"cleanupErrors":s.errors,"temperatureK":s.temperature,"setpointK":s.setpoint,"current_mA":s.current_ma,"outputOn":s.output_on,"voltageX":s.voltage_x,"voltageY":s.voltage_y,"angleDeg":s.angle_deg,"counter":s.counter,"tempStatus":s.temp_status})
     }
     fn checkpoint(&self) -> R<()> {
         if self.abort.load(Ordering::SeqCst) {
@@ -1379,9 +1437,11 @@ impl<'a> Runtime<'a> {
         Ok(())
     }
     fn motor_angle(&mut self) -> R<f64> {
-        let r = self.mq("?CNT1")?;
-        Ok(number(r.split('=').next_back().unwrap_or(""))? * 360.
-            / num(&self.c.h["magnet"]["counts_per_turn"])?)
+        let axis = self.c.h["magnet"]["axis"].as_u64().unwrap_or(1);
+        let r = self.mq(&format!("?CNT{axis}"))?;
+        let count = number(r.split('=').next_back().unwrap_or(""))?;
+        self.job.state.lock().unwrap().counter = Some(count);
+        Ok(count * 360. / num(&self.c.h["magnet"]["counts_per_turn"])?)
     }
     fn angle(&mut self) -> R<f64> {
         let a = if let Some(d) = self.optical.clone() {
@@ -1389,9 +1449,10 @@ impl<'a> Runtime<'a> {
         } else {
             self.motor_angle()?
         };
-        Ok((a * num(&self.c.h["magnet"]["dir_sign"])?
-            + num(&self.c.h["magnet"]["angle_offset_deg"])?)
-        .to_radians())
+        let deg = a * num(&self.c.h["magnet"]["dir_sign"])?
+            + num(&self.c.h["magnet"]["angle_offset_deg"])?;
+        self.job.state.lock().unwrap().angle_deg = Some(deg);
+        Ok(deg.to_radians())
     }
     fn stage(&mut self) -> R<String> {
         let s = self.mq("?ASTAT")?;
@@ -1473,7 +1534,13 @@ impl<'a> Runtime<'a> {
         if ["K6221", "MFLI"].contains(&self.c.h["source"]["model"].as_str().unwrap_or("")) {
             self.sw("SOUR:WAVE:ABOR")?;
         }
-        self.sw("OUTP OFF")
+        let res = self.sw("OUTP OFF");
+        {
+            let mut st = self.job.state.lock().unwrap();
+            st.output_on = false;
+            st.current_ma = 0.;
+        }
+        res
     }
     fn current(&mut self, ma: f64) -> R<()> {
         self.output_off()?;
@@ -1514,6 +1581,11 @@ impl<'a> Runtime<'a> {
         let error = self.sq("SYST:ERR?")?;
         if number(error.split(',').next().unwrap_or(""))? != 0. {
             return Err(format!("Keithley rejected settings: {error}"));
+        }
+        {
+            let mut st = self.job.state.lock().unwrap();
+            st.output_on = true;
+            st.current_ma = ma;
         }
         Ok(())
     }
@@ -1607,6 +1679,11 @@ impl<'a> Runtime<'a> {
             }
             lia.read_xy()?
         };
+        {
+            let mut st = self.job.state.lock().unwrap();
+            st.voltage_x = Some(x);
+            st.voltage_y = Some(y);
+        }
         let t = ((t0 + self.clock.now()).as_secs_f64() / 2.) - self.started.as_secs_f64();
         let temperature = self.temperature()?;
         let s = self.pending.as_mut().ok_or("No acquisition buffer")?;
@@ -1768,9 +1845,41 @@ impl<'a> Runtime<'a> {
         } else {
             format!("RANGE {loopn},{range}")
         })?;
-        let end = self.clock.now() + Duration::from_secs_f64(num(&s["timeout_s"])?);
-        let window = num(&s["window_s"])?;
-        let mut points: Vec<(f64, f64)> = Vec::new();
+        let max_stab_s = s
+            .get("max_stab_s")
+            .or_else(|| s.get("timeout_s"))
+            .map(num)
+            .transpose()?
+            .unwrap_or(3600.);
+        let avg_s = s
+            .get("avg_s")
+            .or_else(|| s.get("window_s"))
+            .map(num)
+            .transpose()?
+            .unwrap_or(30.);
+        let min_stab_s = s
+            .get("min_stab_s")
+            .or_else(|| s.get("window_s"))
+            .map(num)
+            .transpose()?
+            .unwrap_or(avg_s)
+            .max(avg_s);
+        let tol = num(&s["tol"])?;
+        let mean_tol = s
+            .get("mean_tol")
+            .map(num)
+            .transpose()?
+            .unwrap_or(tol);
+        let esd_tol = s
+            .get("esd_tol")
+            .map(num)
+            .transpose()?
+            .unwrap_or(tol);
+
+        let end = self.clock.now() + Duration::from_secs_f64(max_stab_s);
+        let mut in_band_since: Option<f64> = None;
+        let mut window_readings: Vec<(f64, f64)> = Vec::new(); // (t_s, T_reading)
+
         while self.clock.now() < end {
             self.sleep(1.)?;
             self.temp_at = None;
@@ -1783,27 +1892,65 @@ impl<'a> Runtime<'a> {
                 .unwrap()
                 .query(&format!("RAMPST? {loopn}"))?
                 != "0";
-            if error > num(&s["tol"])? || ramp {
-                points.clear();
+
+            if error > tol || ramp {
+                in_band_since = None;
+                window_readings.clear();
+                self.job.state.lock().unwrap().temp_status = Some(json!({
+                    "targetK": target,
+                    "actualK": t,
+                    "deltaK": error,
+                    "ramping": ramp,
+                    "stable": false,
+                    "stableForS": 0.0,
+                    "minStabS": min_stab_s,
+                    "avgS": avg_s,
+                    "maxStabS": max_stab_s
+                }));
                 continue;
             }
-            points.push((now, error));
-            let left = now - window;
-            while points.len() > 1 && points[1].0 <= left {
-                points.remove(0);
+
+            if in_band_since.is_none() {
+                in_band_since = Some(now);
             }
-            if points.len() > 1 && points[0].0 <= left {
-                let mut integral = 0.;
-                for w in points.windows(2) {
-                    let (a, e0) = w[0];
-                    let (b, e1) = w[1];
-                    let t = left.max(a);
-                    let e = e0 + (e1 - e0) * (t - a) / (b - a);
-                    integral += (e + e1) * (b - t) / 2.;
-                }
-                if integral / window <= num(s.get("mean_tol").unwrap_or(&s["tol"]))? {
-                    return Ok(());
-                }
+            let stable_for = now - in_band_since.unwrap();
+
+            window_readings.push((now, t));
+            let cutoff = now - avg_s;
+            while window_readings.len() > 1 && window_readings[0].0 < cutoff {
+                window_readings.remove(0);
+            }
+
+            let covered = window_readings.len() >= 2 && (now - window_readings[0].0) >= (avg_s * 0.8);
+            let mut mean_delta = error;
+            let mut esd = 0.0;
+
+            if covered {
+                let n = window_readings.len() as f64;
+                let mean_t = window_readings.iter().map(|(_, val)| *val).sum::<f64>() / n;
+                mean_delta = (mean_t - target).abs();
+                let var = window_readings.iter().map(|(_, val)| (*val - mean_t).powi(2)).sum::<f64>() / n;
+                esd = var.sqrt();
+            }
+
+            let is_stable = !ramp && covered && stable_for >= min_stab_s && mean_delta <= mean_tol && esd <= esd_tol;
+
+            self.job.state.lock().unwrap().temp_status = Some(json!({
+                "targetK": target,
+                "actualK": t,
+                "deltaK": error,
+                "meanDeltaK": mean_delta,
+                "esdK": esd,
+                "ramping": ramp,
+                "stable": is_stable,
+                "stableForS": stable_for,
+                "minStabS": min_stab_s,
+                "avgS": avg_s,
+                "maxStabS": max_stab_s
+            }));
+
+            if is_stable {
+                return Ok(());
             }
         }
         Err("Temperature stabilization timed out".into())

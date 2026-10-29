@@ -1,7 +1,7 @@
 {
   "format": "halbach-hall-preset",
   "version": 1,
-  "name": "AC field · Sideband AC current (Keithley 6221 + MFLI)",
+  "name": "AC field \u00b7 Sideband AC current (Keithley 6221 + MFLI)",
   "method": {
     "kind": "rotating",
     "tc_ms": 100,
@@ -21,13 +21,16 @@
     "temperature": "off",
     "magnet": {
       "rotator": "OWISPS10",
-      "rotator_addr": "COM3",
+      "rotator_addr": "COM4",
       "baud": 9600,
-      "counts_per_turn": 4000,
+      "counts_per_turn": 50000,
       "velocity_scale": 1,
       "encoder": "",
       "angle_offset_deg": 0,
-      "dir_sign": 1
+      "dir_sign": 1,
+      "unit": 1,
+      "axis": 1,
+      "term": "crlf"
     },
     "source": {
       "model": "K6221",
@@ -41,4 +44,3 @@
     }
   }
 }
-

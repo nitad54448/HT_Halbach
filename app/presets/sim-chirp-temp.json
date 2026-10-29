@@ -1,13 +1,17 @@
 {
   "format": "halbach-hall-preset",
   "version": 1,
-  "name": "Simulation · CHIRP + Lake Shore 335 temperature control",
+  "name": "Simulation \u00b7 CHIRP + Lake Shore 335 temperature control",
   "method": {
     "kind": "chirp",
     "tc_ms": 100,
     "lock_timeout_s": 30,
     "carrier_hz": 700,
-    "levels_mA": [0.5, 1, 2],
+    "levels_mA": [
+      0.5,
+      1,
+      2
+    ],
     "rot_hz": 0.2,
     "cycles": 4,
     "mask_s": 3,
@@ -26,16 +30,19 @@
     },
     "magnet": {
       "rotator": "OWISPS10",
-      "rotator_addr": "SIM::ROTATOR",
+      "rotator_addr": "COM4",
       "baud": 9600,
-      "counts_per_turn": 4000,
+      "counts_per_turn": 50000,
       "velocity_scale": 1,
       "encoder": "NI9361",
       "encoder_addr": "SIM::ENCODER",
       "host": "SIM::CHASSIS",
       "encoder_ppr": 1024,
       "angle_offset_deg": 0,
-      "dir_sign": 1
+      "dir_sign": 1,
+      "unit": 1,
+      "axis": 1,
+      "term": "crlf"
     },
     "source": {
       "model": "K6221",
@@ -49,4 +56,3 @@
     }
   }
 }
-

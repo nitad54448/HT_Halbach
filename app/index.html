@@ -10,8 +10,41 @@
   <div class="brand"><strong>Halbach Hall workstation</strong> <small>· Hall effect, rotating Halbach field</small></div>
   <div class="actions"><span class="badge sim" id="b-mode">Test mode · simulated devices</span><span class="badge" id="b-ls">Temp: not connected</span><span class="badge" id="b-run">Idle</span></div>
 </header>
+
 <nav class="tabs" id="tabs" role="tablist"></nav>
 <main>
+
+<div class="card actual-panel" id="actual-values-panel">
+  <div class="actual-header">
+    <strong>Actual Readings (Real-Time)</strong>
+    <div class="actions">
+      <span class="actual-badge" id="act-temp-badge">Temp: —</span>
+      <button type="button" class="secondary" id="btn-refresh-actual" style="min-height:30px;padding:3px 10px;font-size:12px">Poll readings</button>
+      <button type="button" class="secondary" id="btn-quick-zero" style="min-height:30px;padding:3px 10px;font-size:12px">Set angle as 0°</button>
+    </div>
+  </div>
+  <div class="kpis actual-kpis">
+    <div class="kpi"><span>Temperature</span><b id="act-temp">— K</b><small id="act-temp-status" class="muted">Status: idle</small></div>
+    <div class="kpi"><span>Timestamp / Elapsed</span><b id="act-time">—</b><small id="act-clock" class="muted">—</small></div>
+    <div class="kpi"><span>Excitation current</span><b id="act-current">— mA</b><small id="act-output-badge" class="badge">OUTPUT OFF</small></div>
+    <div class="kpi"><span>Measured voltage</span><b id="act-voltage">— V</b><small id="act-voltage-sub" class="muted">X: — | Y: —</small></div>
+    <div class="kpi"><span>Magnet angle</span><b id="act-angle">—°</b><small id="act-counter" class="muted">Counter: — incs</small></div>
+  </div>
+</div>
+
+<section class="page active" id="p-mode" data-title="Mode">
+  <p class="intro">Choose the method first: DC field with steps or scans, AC field with DC or AC current (sideband detection), or CHIRP. You can also load a preset method defined in JSON. Select compatible devices on the next tab.</p>
+  <div class="grid method-choices" id="mode-cards"></div>
+  <input id="preset-file" type="file" accept=".json,application/json" hidden>
+  <div id="mode-msg" style="margin-top:16px"></div>
+  <div id="method-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
+  <div class="card" id="principle-fixed" hidden><h2>DC field</h2><div class="grid g2">
+    <div class="field"><label>Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
+    <div class="field"><label>Angular acquisition</label><select data-bind="method.fixed.acq"><option value="step">Steps</option><option value="scan">Scans</option></select></div>
+  </div></div>
+  <div class="card" id="principle-rotating" hidden><h2>AC field</h2><div class="field"><label>Excitation</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select></div><p>DC current uses field-frequency detection. AC current uses sideband detection.</p></div>
+  <div class="card" id="principle-chirp" hidden><h2>CHIRP</h2><p>AC current with interleaved amplitudes and continuous field rotation.</p></div>
+</section>
 
 <section class="page" id="p-hardware" data-title="Hardware">
   <h1>Devices and connections</h1><div id="device-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
@@ -37,22 +70,30 @@
       <div class="field"><label for="f-maxr">Software max ramp (K/min)</label><input id="f-maxr" type="number" data-bind="hardware.tempController.maxRateKmin" data-num></div>
     </div>
     <div class="actions" style="margin-top:14px"><button class="primary" id="ls-connect">Connect</button><button class="secondary" id="ls-disconnect" disabled>Disconnect</button><button class="danger" id="ls-heateroff" disabled>Heater off</button></div>
-    <div id="ls-info" class="muted" style="margin-top:10px"></div></div>
+    <div id="ls-info" class="muted" style="margin-top:10px"></div>
+    <div class="card" style="margin-top:14px;background:#0d1721">
+      <h3>Live temperature status</h3>
+      <div id="hw-temp-status" class="notice">Temperature controller idle or off.</div>
+    </div>
+  </div>
   <div class="card subpane" data-pane="magnet"><h2>Rotating Halbach magnet</h2><div class="grid g3">
       <div class="field"><label>Rotation controller</label><select data-bind="hardware.magnet.rotator" data-opts="ROTATOR"></select></div>
-      <div class="field"><label>Port / address</label><input data-bind="hardware.magnet.rotator_addr" placeholder="e.g. COM3"></div>
+      <div class="field"><label>Port / address</label><input data-bind="hardware.magnet.rotator_addr" placeholder="e.g. COM4"></div>
       <div class="field"><label>OWIS baud rate</label><input type="number" data-bind="hardware.magnet.baud" data-num></div>
-      <div class="field"><label>OWIS counts per revolution (calibration)</label><input type="number" data-bind="hardware.magnet.counts_per_turn" data-num data-nullable><small>Required to convert the controller counter to degrees. No homing or motion occurs during checks.</small></div>
-      <div class="field"><label>OWIS velocity command units per count/second</label><input type="number" min="0" step="any" data-bind="hardware.magnet.velocity_scale" data-num data-nullable><small>Calibrate for the motor/firmware. Real runs require an initialized, referenced PS10 axis; existing acceleration and limit settings are retained.</small></div>
-      <div></div>
+      <div class="field"><label>Control unit</label><input type="number" min="1" max="1" data-bind="hardware.magnet.unit" data-num value="1"><small>PS10 unit index (default 1).</small></div>
+      <div class="field"><label>Axis</label><input type="number" min="1" max="9" data-bind="hardware.magnet.axis" data-num value="1"><small>PS10 axis index (default 1).</small></div>
+      <div class="field"><label>Line termination</label><select data-bind="hardware.magnet.term"><option value="crlf" selected>CR+LF (\r\n) [default]</option><option value="cr">CR (\r)</option><option value="lf">LF (\n)</option></select></div>
+      <div class="field"><label>OWIS counts per revolution (calibration)</label><input type="number" data-bind="hardware.magnet.counts_per_turn" data-num data-nullable><small>e.g. 50000 (138.89 inc/deg, 400°=55556) or 50040 (139 inc/deg).</small></div>
+      <div class="field" style="align-self:end"><label>Counts calibration presets</label><div class="actions"><button type="button" class="secondary" id="cal-50000">50000 (138.89 inc/°)</button><button type="button" class="secondary" id="cal-50040">50040 (139 inc/°)</button></div></div>
+      <div class="field"><label>OWIS velocity command units per count/second</label><input type="number" min="0" step="any" data-bind="hardware.magnet.velocity_scale" data-num data-nullable><small>Calibrate for the motor/firmware. Default 1.</small></div>
       <div class="field"><label>Position source</label><select data-bind="hardware.magnet.encoder" data-opts="ENCODER"></select><small>External optical angle is relative and needs a calibrated reference. Unavailable encoder/cDAQ falls back to OWIS absolute position.</small></div>
       <div class="field"><label>cDAQ-9183 Ethernet host / IP</label><input data-bind="hardware.magnet.host" placeholder="192.168.1.100"></div>
       <div class="field"><label>Module / channel</label><input data-bind="hardware.magnet.encoder_addr" placeholder="e.g. cDAQ1Mod2/ctr0"></div>
       <div class="field"><label>Optical encoder pulses per revolution (before ×4 decoding)</label><input type="number" min="1" data-bind="hardware.magnet.encoder_ppr" data-num data-nullable></div>
-      <div></div>
       <div class="field"><label>Field-angle zero offset (deg)</label><input type="number" step="any" data-bind="hardware.magnet.angle_offset_deg" data-num><small>Encoder zero to +X field direction, from calibration.</small></div>
       <div class="field"><label>Position direction</label><select data-bind="hardware.magnet.dir_sign" data-num><option value="1">+1 (position angle = field angle)</option><option value="-1">−1 (reversed)</option></select></div>
       <div class="field"><label>Calibrated field magnitude B (T)</label><input type="number" min="0" step="any" data-bind="sample.B_T" data-num><small>At the sample position.</small></div>
+      <div class="field" style="grid-column: span 3"><div class="actions"><button type="button" class="secondary" id="btn-set-zero-pos">Set current position as 0°</button><span id="zero-pos-status" class="muted"></span></div></div>
     </div></div>
   <div class="card subpane" data-pane="source"><h2>Current source</h2><div class="grid g3">
       <div class="field"><label>Instrument</label><select data-bind="hardware.source.model" data-opts="SOURCES"></select></div>
@@ -73,20 +114,6 @@
   <div class="card"><h2>Declared instruments</h2><div id="hw-summary"></div></div>
   <div class="card"><button class="primary" id="check-connections" disabled>CHECK connections</button><p id="check-requirements"></p><div id="connection-results" role="status" aria-live="polite"></div></div>
   <div class="actions"><button class="secondary" id="save-preset">Save method &amp; devices as JSON</button><span id="preset-save-status" role="status"></span></div>
-</section>
-
-<section class="page" id="p-mode" data-title="Mode">
-  <p class="intro">Choose the method first: DC field with steps or scans, AC field with DC or AC current (sideband detection), or CHIRP. You can also load a preset method defined in JSON. Select compatible devices on the next tab.</p>
-  <div class="grid method-choices" id="mode-cards"></div>
-  <input id="preset-file" type="file" accept=".json,application/json" hidden>
-  <div id="mode-msg" style="margin-top:16px"></div>
-  <div id="method-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
-  <div class="card" id="principle-fixed" hidden><h2>DC field</h2><div class="grid g2">
-    <div class="field"><label>Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
-    <div class="field"><label>Angular acquisition</label><select data-bind="method.fixed.acq"><option value="step">Steps</option><option value="scan">Scans</option></select></div>
-  </div></div>
-  <div class="card" id="principle-rotating" hidden><h2>AC field</h2><div class="field"><label>Excitation</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select></div><p>DC current uses field-frequency detection. AC current uses sideband detection.</p></div>
-  <div class="card" id="principle-chirp" hidden><h2>CHIRP</h2><p>AC current with interleaved amplitudes and continuous field rotation.</p></div>
 </section>
 
 <section class="page" id="p-sample" data-title="Sample">
@@ -133,20 +160,32 @@
       <div class="field" data-when="ac"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
   </div></div>
 <h2>Temperature program</h2>
-  <p class="intro">Build a temperature program from a start, end and positive step size (cooling sweeps are supported). Each point ramps, waits for stability, then measures using the selected measurement mode. ΔT means measured temperature minus target: every reading must stay within the instantaneous limit for the entire window, and the time-averaged |ΔT| must meet the mean limit. A timeout or abort switches the heater off. An end point is included only when reached by a whole step.</p>
+  <p class="intro">Build a temperature program from start, steps, and end temperatures (including multi-segment ramps and cooling). Temperature stability requires remaining continuously in-band for the minimum stabilization time, with time-averaged |ΔT| below the tolerance threshold and temperature standard deviation (ESD σ_T) below the ESD limit during the averaging window.</p>
   <div class="card"><div class="toolbar">
-    <div class="field"><label>Add step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add</button>
+    <div class="field"><label>Add single step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add step</button>
     <span style="width:24px"></span>
-    <div class="field"><label>Sweep from (K)</label><input id="sw0" type="number" value="300"></div><div class="field"><label>to (K)</label><input id="sw1" type="number" value="320"></div><div class="field"><label>step (K)</label><input id="swd" type="number" value="10"></div>
-    <div class="field"><label>rate (K/min)</label><input id="swr" type="number" value="5"></div><div class="field"><label for="sw-tol">Maximum |ΔT| (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
+    <div class="field"><label>Start T (K)</label><input id="sw0" type="number" value="300"></div>
+    <div class="field"><label>End T (K)</label><input id="sw1" type="number" value="320"></div>
+    <div class="field"><label>Step ΔT (K)</label><input id="swd" type="number" value="10"></div>
+    <div class="field"><label>Ramp rate (K/min)</label><input id="swr" type="number" value="5"></div>
+    <div class="field"><label for="sw-minstab">Min stabilization time (s)</label><input id="sw-minstab" type="number" min="1" value="60"></div>
+    <div class="field"><label for="sw-maxstab">Max stab. timeout (s)</label><input id="sw-maxstab" type="number" min="1" value="3600"></div>
+    <div class="field"><label for="sw-window">Averaging duration (s)</label><input id="sw-window" type="number" min="1" value="30"></div>
+    <div class="field"><label for="sw-tol">Max |ΔT| in window (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
     <div class="field"><label for="sw-mean">Mean |ΔT| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
-    <div class="field"><label for="sw-window">Stability window (s)</label><input id="sw-window" type="number" min="1" value="60"></div>
-    <div class="field"><label for="sw-timeout">Timeout per point (s)</label><input id="sw-timeout" type="number" min="1" value="3600"></div>
+    <div class="field"><label for="sw-esd">Max ESD σ_T (K)</label><input id="sw-esd" type="number" min="0" step="any" value="0.02"></div>
     <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>
-    <button class="secondary" id="add-sweep">Append temperature program</button>
+    <button class="secondary" id="add-sweep">Append ramp + steps</button>
     <button class="secondary" id="clear-prog">Clear</button>
   </div>
-  <div class="tablewrap"><table id="prog-table"></table></div>
+  <div class="grid g2" style="margin-top:12px;margin-bottom:12px">
+    <div class="tablewrap"><table id="prog-table"></table></div>
+    <div class="card" style="background:#0d1721;margin:0">
+      <h3>Planned temperature profile (T vs estimated time)</h3>
+      <canvas id="c-prog-preview" style="height:240px"></canvas>
+      <div id="prog-preview-stats" class="muted" style="margin-top:6px;font-size:12px"></div>
+    </div>
+  </div>
   <div id="sweep-msg" role="status"></div>
   <div id="prog-msg" style="margin-top:12px"></div></div>
 </section>
@@ -217,6 +256,27 @@
 <div class="pager" id="pager" style="max-width:1500px;margin:0 auto;padding:0 32px 40px"><button class="secondary" id="back">← Back</button><button class="primary" id="next">Next →</button></div>
 </main>
 <div id="report"></div>
+<div id="splash-modal" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <h2>Measurement Workstation Security</h2>
+    <p>Please enter your local Rust service pairing token to unlock hardware controls, connections, and acquisition.</p>
+    <div class="field">
+      <label for="splash-token-input">Pairing Token (Password)</label>
+      <input id="splash-token-input" type="password" autocomplete="off" placeholder="Paste the token here">
+    </div>
+    <div class="modal-tip">
+      <strong>Where to find the token:</strong>
+      <div style="margin-top:4px">1. In the console when running <code>start-workstation.bat</code></div>
+      <div>2. In the local file: <code>rust-backend/data/service.token</code></div>
+    </div>
+    <div id="splash-modal-status" class="notice err" style="display:none;margin-top:14px"></div>
+    <div class="actions">
+      <button type="button" class="secondary" id="splash-btn-skip">Open Offline / Data View Only</button>
+      <button type="button" class="primary" id="splash-btn-connect">Unlock Hardware</button>
+    </div>
+  </div>
+</div>
+
 <script src="js/core.js"></script><script src="js/lakeshore.js"></script><script src="js/analysis.js"></script><script src="js/modes.js"></script><script src="js/connections.js"></script><script src="js/backend.js"></script><script src="js/sim.js"></script><script src="js/plot.js"></script><script src="js/app.js"></script>
 </body>
 </html>

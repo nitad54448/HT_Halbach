@@ -22,6 +22,7 @@
   const principlePath = path => ['method.fixed.excitation','method.rotating.excitation','method.fixed.acq'].includes(path);
   let ctrl = null, simDev = null, runner = null, running = false, vnow = 0;
   let trace = { t: [], T: [], sp: [] }, stepState = [], selRun = null;
+  let hardwareAuthenticated = false;
 
   /* ---------------- tabs ---------------- */
   const FLOW = [['mode', 'Method'], ['hardware', 'Devices'], ['sample', 'Sample'], ['temp', 'Experiment setup'], ['run', 'Run'], ['inspect', 'Data inspect'], ['analysis', 'Analysis']];
@@ -37,7 +38,12 @@
     }
   }
   function reachable(id) {
-    if(running&&['run','temp','mode','hardware'].includes(id))return true;
+    if (id === 'mode') return true;
+    // When not connected to real hardware (e.g. GitHub Pages or offline), permit safe viewing & analysis tabs
+    if (P.hardware.backend === 'real' && !hardwareAuthenticated) {
+      return ['mode', 'hardware', 'inspect', 'analysis', 'project'].includes(id);
+    }
+    if (running && ['run', 'temp', 'mode', 'hardware'].includes(id)) return true;
     if (UTIL.some(u => u[0] === id)) return true;
     if (P.runs.length && ['inspect', 'analysis'].includes(id)) return true;
     const i = FLOW.findIndex(f => f[0] === id);
@@ -139,9 +145,53 @@
     hist(P, 'preset', 'Loaded ' + (o.name || 'preset'));
     syncForm(); renderMode(); refreshTabs();
   }
+  async function loadProjectObject(o, name) {
+    if (running) throw new Error('Cannot load while a program is running.');
+    if (o.format !== 'halbach-hall-project') throw new Error('Not a Halbach Hall project file.');
+    if (o.version > 1) throw new Error('Project version ' + o.version + ' is newer than this application supports.');
+    const base = newProject(), np = Object.assign(base, o);
+    np.sample = Object.assign(base.sample, o.sample);
+    np.method = Object.assign(newProject().method, o.method);
+    for (const k of ['fixed', 'rotating']) np.method[k] = Object.assign(newProject().method[k], (o.method || {})[k]);
+    if (!o.method || !o.method.kind) np.method.kind = 'chirp';
+    np.hardware = Object.assign(newProject().hardware, o.hardware);
+    for (const k of ['tempController', 'magnet', 'source', 'measure']) np.hardware[k] = Object.assign(newProject().hardware[k], (o.hardware || {})[k]);
+    if (np.method.fixed.excitation === 'delta') { np.method.fixed.excitation = 'dc'; np.hardware.measure.dc_mode = 'delta'; }
+    if (!o.method?.cycles) np.method.cycles = Math.max(1, Math.ceil(np.method.dwell_s * np.method.rot_hz));
+    for (const r of np.runs) {
+      const s = r.samples, n = s && s.t ? s.t.length : -1;
+      if (n < 1 || ['theta', 'X', 'Y', 'I', 'T', 'valid'].some(k => !Array.isArray(s[k]) || s[k].length !== n)) {
+        throw new Error(`Run ${r.id}: inconsistent sample arrays.`);
+      }
+    }
+    if (dirty && !confirm('Unsaved changes will be lost. Load anyway?')) return;
+    P = np; ctrl = null; simDev = null; dirty = false; selRun = P.runs.length ? P.runs[0].id : null;
+    np.runs.forEach(r => { if (!r.fit && !r.fitError) fitRun(r); });
+    if (Array.isArray(o.log)) {
+      Logger.entries = o.log.slice(-Logger.max);
+      Logger.seq = Logger.entries.reduce((m, e) => Math.max(m, e.n || 0), 0);
+    }
+    hist(P, 'project', `loaded ${name} (${P.runs.length} runs)`);
+    Logger.info('IO', `Loaded project ${name}: ${P.runs.length} runs`);
+    connectionCheck = null; syncForm(); setBadges();
+    const loadedMsg = `Loaded ${name}: ${P.runs.length} run${P.runs.length === 1 ? '' : 's'}.`;
+    $('mode-msg').innerHTML = `<div class="notice ok">${esc(loadedMsg)}</div>`;
+    msg(loadedMsg, 'ok');
+    show(P.runs.length ? 'analysis' : 'mode');
+  }
   $('preset-file').onchange = async ev => {
     const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
-    try { await loadPreset(JSON.parse(await f.text())); } catch (e) { $('mode-msg').textContent = e.message; }
+    try {
+      const text = await f.text();
+      const o = JSON.parse(text);
+      if (o.format === 'halbach-hall-project') {
+        await loadProjectObject(o, f.name);
+      } else {
+        await loadPreset(o);
+      }
+    } catch (e) {
+      $('mode-msg').innerHTML = `<div class="notice err">${esc(e.message)}</div>`;
+    }
   };
   $('save-preset').onclick = () => {
     if (checking) return;
@@ -190,12 +240,14 @@
     $('check-requirements').textContent = configErrors.length ? 'Configure the required devices and addresses: ' + configErrors.join('; ') : 'Required instruments configured. Ready to check connections.';
     for (const path of ['hardware.magnet.host', 'hardware.magnet.encoder_addr', 'hardware.magnet.encoder_ppr']) document.querySelector(`[data-bind="${path}"]`).closest('.field').hidden = !h.magnet.encoder;
     const isDC = HH.usesVoltmeter(P.method);
+    const isDeltaMode = HH.isDelta(P);
     document.querySelectorAll('[data-bind^="hardware.measure."]').forEach(el => {
       const dc = /\.(volt|volt_addr|dc_mode)$/.test(el.dataset.bind);
       el.closest('.field').hidden = dc ? !isDC : isDC;
     });
-    document.querySelector('[data-bind="hardware.measure.volt_addr"]').closest('.field').hidden = !isDC || HH.isDelta(P);
-    $('delta-info').hidden = !HH.isDelta(P);
+    // If Keithley 2182 is paired with 6220/6221, hide the redundant address box
+    document.querySelector('[data-bind="hardware.measure.volt_addr"]').closest('.field').hidden = !isDC || isDeltaMode;
+    $('delta-info').hidden = !isDeltaMode;
     const exc = HH.excitationOf(P.method);
     document.querySelectorAll('[data-bind="hardware.source.model"] option').forEach(o => { o.disabled = !!o.value && (!HH.SOURCES[o.value]?.[exc === 'delta' ? 'dc' : exc] || (HH.isDelta(P) && !['K6220','K6221'].includes(o.value))); });
     $('measure-msg').innerHTML += HH.connectionErrors(P).map(e => `<div class="notice err">${esc(e)}</div>`).join('');
@@ -232,7 +284,11 @@
     finally { $('check-reference').disabled = false; }
   };
   function setBadges() {
-    $('b-mode').textContent = P.hardware.backend === 'simulation' ? 'SIMULATION: synthetic data' : 'Real instruments';
+    const isOfflineViewer = !hardwareAuthenticated && P.hardware.backend === 'real';
+    $('b-mode').textContent = P.hardware.backend === 'simulation'
+      ? 'SIMULATION: synthetic data'
+      : (isOfflineViewer ? 'Data viewer / offline' : 'Real instruments');
+    $('b-mode').className = 'badge ' + (P.hardware.backend === 'simulation' ? 'sim' : (isOfflineViewer ? '' : 'ok'));
     const m = $('b-ls'); m.textContent = P.hardware.temperature === 'off' ? 'Temp: OFF' : P.hardware.backend === 'real' && connectionsOk() ? 'Temp: verified ('+P.hardware.temperature+')' : ctrl ? `Temp: ${P.hardware.temperature} (simulated)` : 'Temp: not connected'; m.className = 'badge ' + (ctrl || connectionsOk() ? 'ok' : '');
     const r = $('b-run'); r.textContent = running ? (runner?.state === 'paused' ? 'Paused' : 'Running') : 'Idle'; r.className = 'badge ' + (running ? 'run' : '');
     $('ls-connect').disabled = true; $('ls-disconnect').disabled = configurationLocked() || !ctrl; $('ls-heateroff').disabled = !ctrl || P.hardware.temperature !== 'control';
@@ -272,21 +328,97 @@
   function methodErrors() { return HH.modeErrors(P).concat(HH.sampleErrors(P)); }
   function renderMode() {
     const av = HH.availability(P.hardware), m = P.method, box = $('mode-cards'); box.replaceChildren();
+    const MODE_META = {
+      fixed: {
+        pill: 'DC Field',
+        icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="8" rx="1.5"/><rect x="15" y="3" width="6" height="8" rx="1.5"/><path d="M3 7h6M15 7h6"/><path d="M6 11v3a6 6 0 0 0 12 0v-3"/><path d="M3 21h18M7 21v-3M12 21v-6M17 21v-3"/></svg>',
+        chips: ['Steps & settle', 'Angular scan', 'DC / AC source'],
+      },
+      rotating: {
+        pill: 'AC Field',
+        icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"/><path d="M8 12c1.5-3 3-3 4 0s2.5 3 4 0"/></svg>',
+        chips: ['Continuous rotation', 'Lock-in detection', 'Sideband 2ω'],
+      },
+      chirp: {
+        pill: 'CHIRP',
+        icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h3l2.5-7 3.5 14 3.5-9 2.5 6 3-4h4"/><circle cx="7.5" cy="6" r="1.5" fill="currentColor"/><circle cx="11" cy="20" r="1.5" fill="currentColor"/><circle cx="14.5" cy="11" r="1.5" fill="currentColor"/></svg>',
+        chips: ['Current hopping', 'Interleaved rot', 'Calibrated angle'],
+      },
+    };
+
     for (const [k, md] of Object.entries(HH.MODES)) {
-      const a = av[k], b = document.createElement('button'); b.className = 'mode-card' + (m.kind === k ? ' sel' : ''); b.disabled = configurationLocked();
+      const a = av[k], b = document.createElement('button');
+      const isSel = m.kind === k;
+      b.type = 'button';
+      b.className = `mode-card mode-${k}` + (isSel ? ' sel' : '');
+      b.disabled = configurationLocked();
+      const meta = MODE_META[k];
       const why = a.ok ? '' : md.variants.map(v => `${HH.EXC[v]}: needs ${a.variants[v].missing.join(', ')}`).join(' · ');
-      b.innerHTML = `<b>${esc(md.label)}</b><small>${esc(md.ref)}</small><small>${esc(md.text)}</small>`;
+      b.innerHTML = `
+        <div class="mode-card-header">
+          <div class="mode-icon-box">${meta.icon}</div>
+          <div class="mode-badges">
+            <span class="mode-pill">${meta.pill}</span>
+            ${isSel
+              ? `<span class="mode-active-pill"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Selected</span>`
+              : `<span class="mode-ref">${esc(md.ref)}</span>`}
+          </div>
+        </div>
+        <div class="mode-card-title">${esc(md.label)}</div>
+        <div class="mode-card-desc">${esc(md.text)}</div>
+        <div class="mode-chips">
+          ${meta.chips.map(c => `<span class="mode-chip">${esc(c)}</span>`).join('')}
+        </div>
+        ${why ? `<div class="mode-why">⚠️ ${esc(why)}</div>` : ''}
+        <div class="mode-card-footer">
+          <span class="mode-indicator">
+            <span class="mode-indicator-dot"></span>
+            <span>${isSel ? 'Active Method' : 'Click to Select'}</span>
+          </span>
+          <span class="mode-arrow">${isSel ? '✓' : '→'}</span>
+        </div>
+      `;
       b.onclick = () => {
-        if(configurationLocked()) return;
-        const old = m.kind; m.kind = k; const ex = m[k] && m[k].excitation;
+        if (configurationLocked()) return;
+        const old = m.kind; m.kind = k;
         connectionCheck = null; ctrl = null; simDev = null;
         hist(P, 'config', `mode: ${old || 'none'} → ${k}`); dirty = true; syncForm(); renderMode(); refreshTabs();
       };
       box.append(b);
     }
-    const presetCard=document.createElement('button');presetCard.className='mode-card';presetCard.id='preset-card';presetCard.disabled=configurationLocked();
-    presetCard.innerHTML='<b>Load preset</b><small>Open a JSON file containing the method and devices.</small>';
-    presetCard.onclick=()=> $('preset-file').click();box.append(presetCard);
+
+    const presetCard = document.createElement('button');
+    presetCard.type = 'button';
+    presetCard.className = 'mode-card mode-preset';
+    presetCard.id = 'preset-card';
+    presetCard.disabled = configurationLocked();
+    presetCard.innerHTML = `
+      <div class="mode-card-header">
+        <div class="mode-icon-box">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+        </div>
+        <div class="mode-badges">
+          <span class="mode-pill">FILE / PRESET</span>
+          <span class="mode-ref">JSON</span>
+        </div>
+      </div>
+      <div class="mode-card-title">Load data or preset</div>
+      <div class="mode-card-desc">Open previously acquired experimental data runs, or import a saved method and instrument preset.</div>
+      <div class="mode-chips">
+        <span class="mode-chip">Acquired data</span>
+        <span class="mode-chip">Method preset</span>
+        <span class="mode-chip">JSON import</span>
+      </div>
+      <div class="mode-card-footer">
+        <span class="mode-indicator">
+          <span class="mode-indicator-dot"></span>
+          <span>Open JSON file</span>
+        </span>
+        <span class="mode-arrow">↑</span>
+      </div>
+    `;
+    presetCard.onclick = () => $('preset-file').click();
+    box.append(presetCard);
     document.querySelectorAll('.mode-panel').forEach(p => p.hidden = p.id !== 'mp-' + m.kind);
     for(const k of ['fixed','rotating','chirp']) $('principle-'+k).hidden=m.kind!==k;
     document.querySelector('[data-bind="method.tc_ms"]').closest('.card').hidden=!m.kind||HH.usesVoltmeter(m);
@@ -324,8 +456,8 @@
     for (const o of sel.options) o.disabled = P.hardware.temperature !== 'control' && ['goto', 'heater_off'].includes(o.value);
     if (sel.selectedOptions[0]?.disabled) sel.value = 'measure';
     $('add-sweep').disabled = running || P.hardware.temperature !== 'control';
-    const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'tol', 'mean_tol', 'window_s', 'timeout_s'], soak: ['seconds'], measure: ['label'], heater_off: [] };
-    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', tol: 'Tol ±K', mean_tol: 'Mean |ΔT| (K)', window_s: 'Window (s)', timeout_s: 'Timeout (s)', seconds: 'Seconds', label: 'Label' };
+    const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'min_stab_s', 'max_stab_s', 'avg_s', 'tol', 'mean_tol', 'esd_tol'], soak: ['seconds'], measure: ['label'], heater_off: [] };
+    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', min_stab_s: 'Min stab (s)', max_stab_s: 'Max stab (s)', avg_s: 'Avg win (s)', tol: 'Max |ΔT| (K)', mean_tol: 'Mean |ΔT| (K)', esd_tol: 'ESD σ_T (K)', seconds: 'Seconds', label: 'Label' };
     t.innerHTML = '<tr><th>#</th><th>Step</th><th>Parameters</th><th></th></tr>';
     P.tempProgram.forEach((s, i) => {
       const tr = t.insertRow(); tr.insertCell().textContent = i + 1; tr.insertCell().textContent = HH.STEP_TYPES[s.type].label;
@@ -334,8 +466,16 @@
         const w = document.createElement('label'); w.style.cssText = 'display:inline-block;margin-right:12px;font-size:11px;color:#9db0c0'; w.append(hdr[k] + ' ');
         let inp;
         if (k === 'range') { inp = document.createElement('select'); ['low', 'medium', 'high'].forEach(r => inp.add(new Option(r, r))); }
-        else { inp = document.createElement('input'); inp.type = k === 'label' ? 'text' : 'number'; inp.step = 'any'; inp.style.width = k === 'label' ? '120px' : '90px'; }
-        inp.value = k === 'mean_tol' && s[k] === undefined ? s.tol : s[k]; inp.dataset.stepIndex=i; inp.disabled = running && i <= (runner?.index??stepState.findIndex(x=>x==='start'));
+        else { inp = document.createElement('input'); inp.type = k === 'label' ? 'text' : 'number'; inp.step = 'any'; inp.style.width = k === 'label' ? '120px' : '75px'; }
+        let val = s[k];
+        if (val === undefined) {
+          if (k === 'mean_tol') val = s.tol;
+          else if (k === 'esd_tol') val = s.tol;
+          else if (k === 'avg_s') val = s.window_s || 30;
+          else if (k === 'min_stab_s') val = s.window_s || 60;
+          else if (k === 'max_stab_s') val = s.timeout_s || 3600;
+        }
+        inp.value = val; inp.dataset.stepIndex=i; inp.disabled = running && i <= (runner?.index??stepState.findIndex(x=>x==='start'));
         inp.onchange = () => { const old = s[k]; s[k] = k === 'label' || k === 'range' ? inp.value : Number(inp.value); hist(P, 'program', `step ${i + 1} ${k}: ${old} → ${s[k]}`); dirty = true; renderProgram(); refreshTabs(); };
         w.append(inp); c.append(w);
       });
@@ -343,6 +483,7 @@
       [['↑', -1], ['↓', 1]].forEach(([l, d]) => { const b = document.createElement('button'); b.className = 'secondary'; b.textContent = l; b.disabled = running || i + d < 0 || i + d >= P.tempProgram.length; b.onclick = () => { const a = P.tempProgram; [a[i], a[i + d]] = [a[i + d], a[i]]; hist(P, 'program', `moved step ${i + 1}`); dirty = true; renderProgram(); }; ac.append(b, ' '); });
       const x = document.createElement('button'); x.className = 'danger'; x.textContent = '✕'; x.disabled = running; x.onclick = () => { P.tempProgram.splice(i, 1); hist(P, 'program', `deleted step ${i + 1} (${s.type})`); dirty = true; renderProgram(); refreshTabs(); }; ac.append(x);
     });
+    drawProgramPreview();
     const errs = progErrors(), warn = HH.programWarnings(P.tempProgram), est = HH.estimateDuration(P.tempProgram, 295);
     const meas = P.tempProgram.filter(s => s.type === 'measure').length, per = Math.round(HH.acqSeconds(P.method));
     $('prog-msg').innerHTML = (P.tempProgram.length ? '' : '<div class="muted">No steps yet. Add steps or append a sweep.</div>') +
@@ -366,18 +507,55 @@
   };
   function fmtDur(s) { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`; }
   $('add-step').onclick = () => { const ty = $('add-type').value; P.tempProgram.push(HH.makeStep(ty)); hist(P, 'program', 'added step ' + ty); dirty = true; renderProgram(); refreshTabs(); };
+  function drawProgramPreview() {
+    const canvas = $('c-prog-preview');
+    if (!canvas) return;
+    let T = 295, t_sec = 0;
+    const pts_t = [0], pts_T = [T];
+    P.tempProgram.forEach(s => {
+      if (s.type === 'goto') {
+        const rampDur = Math.abs(s.T - T) / (s.rate || 5) * 60;
+        t_sec += rampDur;
+        pts_t.push(t_sec / 60);
+        pts_T.push(s.T);
+        const stab = s.min_stab_s !== undefined ? s.min_stab_s : (s.window_s || 60);
+        t_sec += stab;
+        pts_t.push(t_sec / 60);
+        pts_T.push(s.T);
+        T = s.T;
+      } else if (s.type === 'soak') {
+        t_sec += (s.seconds || 60);
+        pts_t.push(t_sec / 60);
+        pts_T.push(T);
+      }
+    });
+    HH.plot(canvas, [{ x: pts_t, y: pts_T, color: '#66d6ce' }], { xlabel: 'Estimated time (min)', ylabel: 'T (K)' });
+    const statsEl = $('prog-preview-stats');
+    if (statsEl) {
+      statsEl.textContent = `Total thermal steps: ${P.tempProgram.filter(s => s.type === 'goto').length} | Est. thermal duration: ≈ ${fmtDur(t_sec)}`;
+    }
+  }
+
   $('add-sweep').onclick = () => {
     if (running) return;
     try {
       const steps = HH.sweep(+$('sw0').value, +$('sw1').value, +$('swd').value, {
-        rate: +$('swr').value, tol: +$('sw-tol').value, mean_tol: +$('sw-mean').value,
-        window_s: +$('sw-window').value, timeout_s: +$('sw-timeout').value, range: $('sw-range').value,
+        rate: +$('swr').value,
+        min_stab_s: +$('sw-minstab').value,
+        max_stab_s: +$('sw-maxstab').value,
+        avg_s: +$('sw-window').value,
+        tol: +$('sw-tol').value,
+        mean_tol: +$('sw-mean').value,
+        esd_tol: +$('sw-esd').value,
+        window_s: +$('sw-window').value,
+        timeout_s: +$('sw-maxstab').value,
+        range: $('sw-range').value,
       });
       const errors = HH.validateProgram(steps, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
       if (errors.length) throw new Error(errors[0]);
       P.tempProgram.push(...steps);
       hist(P, 'program', `Appended ${steps.length / 2} temperature points`, { steps }); dirty = true;
-      $('sweep-msg').textContent = `Added ${steps.length / 2} temperature points, each followed by a measurement.`;
+      $('sweep-msg').textContent = `Added ${steps.length / 2} temperature points (ramps + measurement).`;
     } catch (e) { Logger.error('UI', e.message); $('sweep-msg').textContent = e.message; }
     renderProgram(); refreshTabs();
   };
@@ -438,6 +616,18 @@
         $('r-prog').style.width=((status.step+(status.state==='finished'?1:0))/P.tempProgram.length*100)+'%';
         vnow=(Date.now()-realStarted)/1000;
         if (Number.isFinite(status.temperatureK)) {trace.t.push(vnow);trace.T.push(status.temperatureK);trace.sp.push(status.setpointK??NaN);}
+        updateActualTelemetry({
+          T: status.temperatureK,
+          sp: status.setpointK,
+          current_mA: status.current_mA,
+          outputOn: status.outputOn,
+          voltageX: status.voltageX,
+          voltageY: status.voltageY,
+          angleDeg: status.angleDeg,
+          counter: status.counter,
+          tempStatus: status.tempStatus,
+          elapsedS: vnow,
+        });
         setStatus(status.message+(status.cleanupErrors?.length?' — '+status.cleanupErrors.join('; '):''));updateKpis({T:status.temperatureK,setpoint:status.setpointK,heater:null});renderRun();
         if (['finished','error','aborted'].includes(status.state)) {
           if (status.state==='finished') stepState=stepState.map(()=> 'done');
@@ -625,24 +815,12 @@
   };
   $('pr-load').onchange = async ev => {
     const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
-    if (running) { msg('Cannot load while a program is running.', 'err'); return; }
     try {
-      const o = JSON.parse(await f.text());
-      if (o.format !== 'halbach-hall-project') throw new Error('Not a Halbach Hall project file.');
-      if (o.version > 1) throw new Error('Project version ' + o.version + ' is newer than this application supports.');
-      const base = newProject(), np = Object.assign(base, o);
-      np.sample = Object.assign(base.sample, o.sample); np.method = Object.assign(newProject().method, o.method); for (const k of ['fixed', 'rotating']) np.method[k] = Object.assign(newProject().method[k], (o.method || {})[k]); if (!o.method || !o.method.kind) np.method.kind = 'chirp';
-      np.hardware = Object.assign(newProject().hardware, o.hardware); for (const k of ['tempController', 'magnet', 'source', 'measure']) np.hardware[k] = Object.assign(newProject().hardware[k], (o.hardware || {})[k]);
-      if (np.method.fixed.excitation === 'delta') {np.method.fixed.excitation='dc';np.hardware.measure.dc_mode='delta';}
-      if (!o.method?.cycles) np.method.cycles = Math.max(1, Math.ceil(np.method.dwell_s * np.method.rot_hz));
-      for (const r of np.runs) { const s = r.samples, n = s && s.t ? s.t.length : -1; if (n < 1 || ['theta', 'X', 'Y', 'I', 'T', 'valid'].some(k => !Array.isArray(s[k]) || s[k].length !== n)) throw new Error(`Run ${r.id}: inconsistent sample arrays.`); }
-      if (dirty && !confirm('Unsaved changes will be lost. Load anyway?')) return;
-      P = np; ctrl = null; simDev = null; dirty = false; selRun = P.runs.length ? P.runs[0].id : null;
-      np.runs.forEach(r => { if (!r.fit && !r.fitError) fitRun(r); });
-      if (Array.isArray(o.log)) { Logger.entries = o.log.slice(-Logger.max); Logger.seq = Logger.entries.reduce((m, e) => Math.max(m, e.n || 0), 0); }
-      hist(P, 'project', `loaded ${f.name} (${P.runs.length} runs)`); Logger.info('IO', `Loaded project ${f.name}: ${P.runs.length} runs`);
-      connectionCheck = null; syncForm(); setBadges(); msg(`Loaded ${f.name}: ${P.runs.length} runs. Check device connections before running.`, 'ok'); show(P.runs.length ? 'analysis' : 'project');
-    } catch (e) { Logger.error('IO', 'Load failed: ' + e.message); msg('Load failed: ' + e.message, 'err'); }
+      await loadProjectObject(JSON.parse(await f.text()), f.name);
+    } catch (e) {
+      Logger.error('IO', 'Load failed: ' + e.message);
+      msg('Load failed: ' + e.message, 'err');
+    }
   };
   $('pr-new').onclick = async () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = newProject(); connectionCheck = null; ctrl = null; simDev = null; dirty = false; selRun = null; syncForm(); setBadges(); hist(P, 'project', 'new project'); show('mode'); };
   $('pr-csv').onclick = () => {
@@ -677,11 +855,361 @@
     hist(P, 'project', 'report printed'); Logger.info('IO', 'Report generated'); window.print();
   };
 
+  /* ---------------- Live Actual Values Telemetry & Zero Position ---------------- */
+  let actualTelemetry = {
+    T: null, sp: null, current_mA: 0, outputOn: false,
+    voltageX: null, voltageY: null, angleDeg: null, counter: null,
+    tempStatus: null, elapsedS: 0
+  };
+
+  function updateActualTelemetry(data) {
+    Object.assign(actualTelemetry, data);
+    renderActualPanel();
+  }
+
+  function renderActualPanel() {
+    const act = actualTelemetry;
+    const isTempOn = P.hardware.temperature !== 'off';
+    const tempK = act.T;
+    $('act-temp').textContent = Number.isFinite(tempK) ? `${tempK.toFixed(3)} K` : '— K';
+
+    let stabText = 'Status: idle';
+    let badgeClass = '';
+    let badgeLabel = 'Temp: —';
+
+    if (!isTempOn) {
+      stabText = 'Temperature: OFF';
+      badgeLabel = 'Temp: OFF';
+    } else if (act.tempStatus) {
+      const ts = act.tempStatus;
+      if (ts.ramping) {
+        stabText = `Ramping to ${ts.targetK} K | ΔT=${fx(ts.deltaK, 3)} K`;
+        badgeLabel = 'Ramping';
+        badgeClass = 'sim';
+      } else if (ts.stable) {
+        stabText = `Stable at ${fx(ts.actualK, 3)} K (ΔT=${fx(ts.meanDeltaK ?? ts.deltaK, 4)} K, ESD=${fx(ts.esdK, 4)} K, ${Math.round(ts.stableForS)} s)`;
+        badgeLabel = 'Stable';
+        badgeClass = 'ok';
+      } else {
+        stabText = `Stabilizing (in band ${Math.round(ts.stableForS || 0)}/${ts.minStabS || 60} s, |ΔT|=${fx(ts.meanDeltaK ?? ts.deltaK, 3)} K, ESD=${fx(ts.esdK, 3)} K)`;
+        badgeLabel = 'Stabilizing';
+        badgeClass = 'sim';
+      }
+    } else if (Number.isFinite(tempK)) {
+      stabText = P.hardware.temperature === 'control' ? (act.sp ? `Setpoint: ${act.sp} K` : 'Monitor mode') : 'Read-only sensor';
+      badgeLabel = `${P.hardware.temperature} (${tempK.toFixed(2)} K)`;
+      badgeClass = 'ok';
+    }
+    $('act-temp-status').textContent = stabText;
+    const tb = $('act-temp-badge');
+    if (tb) {
+      tb.textContent = badgeLabel;
+      tb.className = 'actual-badge ' + badgeClass;
+    }
+    const hwSt = $('hw-temp-status');
+    if (hwSt) {
+      hwSt.textContent = `${badgeLabel} — ${stabText}`;
+      hwSt.className = 'notice ' + (badgeClass === 'ok' ? 'ok' : '');
+    }
+
+    // Time
+    $('act-time').textContent = running ? fmtDur(act.elapsedS || vnow) : '0 min 0 s';
+    $('act-clock').textContent = new Date().toLocaleTimeString();
+
+    // Current & Output State
+    $('act-current').textContent = `${(act.current_mA || 0).toFixed(3)} mA`;
+    const outB = $('act-output-badge');
+    if (outB) {
+      outB.textContent = act.outputOn ? 'OUTPUT ON' : 'OUTPUT OFF';
+      outB.className = 'badge ' + (act.outputOn ? 'run' : '');
+    }
+
+    // Measured Voltage
+    if (Number.isFinite(act.voltageX)) {
+      $('act-voltage').textContent = `${fx(act.voltageX, 4)} V`;
+      $('act-voltage-sub').textContent = Number.isFinite(act.voltageY) ? `X: ${fx(act.voltageX, 4)} V | Y: ${fx(act.voltageY, 4)} V` : `V: ${fx(act.voltageX, 4)} V`;
+    } else {
+      $('act-voltage').textContent = '— V';
+      $('act-voltage-sub').textContent = 'X: — | Y: —';
+    }
+
+    // Magnet Angle
+    if (Number.isFinite(act.angleDeg)) {
+      $('act-angle').textContent = `${act.angleDeg.toFixed(2)}°`;
+    } else {
+      $('act-angle').textContent = '—°';
+    }
+    $('act-counter').textContent = Number.isFinite(act.counter) ? `Counter: ${act.counter} incs` : 'Counter: — incs';
+  }
+
+  async function pollLiveTelemetry() {
+    if (running && P.hardware.backend === 'real') return;
+    try {
+      if (P.hardware.backend === 'real' && window.HHHardware) {
+        // Read temperature if active
+        if (P.hardware.temperature !== 'off' && P.hardware.tempController.address) {
+          try {
+            const tr = await window.HHHardware.readDevice({
+              role: 'temperature',
+              model: P.hardware.tempController.model,
+              address: P.hardware.tempController.address,
+              input: P.hardware.tempController.input
+            });
+            if (tr && Number.isFinite(tr.temperatureK)) {
+              actualTelemetry.T = tr.temperatureK;
+            }
+          } catch (_) {}
+        }
+        // Read OWIS motor position
+        if (P.hardware.magnet.rotator_addr) {
+          try {
+            const mr = await window.HHHardware.readDevice({
+              role: 'motion',
+              model: 'OWISPS10',
+              address: P.hardware.magnet.rotator_addr,
+              baud: P.hardware.magnet.baud || 9600,
+              unit: P.hardware.magnet.unit || 1,
+              axis: P.hardware.magnet.axis || 1,
+              countsPerTurn: P.hardware.magnet.counts_per_turn,
+              angleOffsetDeg: P.hardware.magnet.angle_offset_deg || 0,
+              dirSign: P.hardware.magnet.dir_sign || 1
+            });
+            if (mr) {
+              actualTelemetry.counter = mr.counter;
+              actualTelemetry.angleDeg = mr.angleDeg;
+            }
+          } catch (_) {}
+        }
+      } else if (P.hardware.backend === 'simulation') {
+        if (ctrl) {
+          try {
+            actualTelemetry.T = await ctrl.readK();
+            actualTelemetry.sp = await ctrl.getSetpoint();
+          } catch (_) {}
+        }
+      }
+      renderActualPanel();
+    } catch (e) {
+      Logger.debug('ACT', 'Poll readings: ' + e.message);
+    }
+  }
+
+  async function setZeroPosition() {
+    if (running) return;
+    const statusEl = $('zero-pos-status');
+    try {
+      if (P.hardware.backend === 'real' && window.HHHardware && P.hardware.magnet.rotator_addr) {
+        const mr = await window.HHHardware.readDevice({
+          role: 'motion',
+          model: 'OWISPS10',
+          address: P.hardware.magnet.rotator_addr,
+          baud: P.hardware.magnet.baud || 9600,
+          unit: P.hardware.magnet.unit || 1,
+          axis: P.hardware.magnet.axis || 1,
+          countsPerTurn: P.hardware.magnet.counts_per_turn,
+          angleOffsetDeg: 0,
+          dirSign: 1
+        });
+        if (mr && Number.isFinite(mr.counter)) {
+          const rawAngle = (mr.counter * 360.) / (P.hardware.magnet.counts_per_turn || 50000);
+          const dir = P.hardware.magnet.dir_sign || 1;
+          const newOffset = -rawAngle * dir;
+          P.hardware.magnet.angle_offset_deg = +newOffset.toFixed(4);
+          syncForm();
+          if (statusEl) statusEl.textContent = `Zero set: counter ${mr.counter} mapped to 0.0° (offset: ${P.hardware.magnet.angle_offset_deg}°).`;
+          hist(P, 'config', `Set angle 0° at counter ${mr.counter}`);
+          actualTelemetry.angleDeg = 0.0;
+          actualTelemetry.counter = mr.counter;
+          renderActualPanel();
+          return;
+        }
+      }
+      // Simulation or fallback:
+      P.hardware.magnet.angle_offset_deg = 0;
+      actualTelemetry.angleDeg = 0.0;
+      if (statusEl) statusEl.textContent = 'Zero offset set to 0.0°.';
+      syncForm();
+      renderActualPanel();
+    } catch (e) {
+      if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+      Logger.error('ZERO', e.message);
+    }
+  }
+
+  $('btn-refresh-actual').onclick = pollLiveTelemetry;
+  $('btn-quick-zero').onclick = setZeroPosition;
+  const zeroBtn2 = $('btn-set-zero-pos');
+  if (zeroBtn2) zeroBtn2.onclick = setZeroPosition;
+
+  const cal50000 = $('cal-50000');
+  if (cal50000) cal50000.onclick = () => {
+    P.hardware.magnet.counts_per_turn = 50000;
+    syncForm();
+    hist(P, 'config', 'OWIS counts set to 50000 (138.89 inc/deg, 400°=55556 inc)');
+  };
+  const cal50040 = $('cal-50040');
+  if (cal50040) cal50040.onclick = () => {
+    P.hardware.magnet.counts_per_turn = 50040;
+    syncForm();
+    hist(P, 'config', 'OWIS counts set to 50040 (139 inc/deg)');
+  };
+
+  setInterval(() => {
+    if (!running) {
+      renderActualPanel();
+    }
+  }, 1000);
+
+  /* ---------------- Splash Modal & Token Persistence ---------------- */
+  async function initTokenSplash() {
+    const splashModal = $('splash-modal');
+    const splashInput = $('splash-token-input');
+    const splashStatus = $('splash-modal-status');
+    const hostname = window.location.hostname;
+    const isRemote = hostname.endsWith('github.io') ||
+                     (hostname && !['localhost', '127.0.0.1', '[::1]'].includes(hostname) && window.location.protocol !== 'file:');
+
+    // On GitHub Pages or remote client computers: NEVER show token splash modal!
+    // App opens directly in data viewer & analysis mode for reading previously acquired data.
+    if (isRemote) {
+      hardwareAuthenticated = false;
+      if (splashModal) splashModal.style.display = 'none';
+      setBadges();
+      refreshTabs();
+      show('mode');
+      return;
+    }
+
+    // On the local instrument workstation:
+    const settings = window.HHHardware.settings?.() || { baseUrl: 'http://127.0.0.1:8765', token: '' };
+
+    if (settings.token) {
+      if (splashInput) splashInput.value = settings.token;
+      // Validate saved/embedded token with backend
+      try {
+        const v = await window.HHHardware.verifyToken(settings.token);
+        if (v.ok) {
+          hardwareAuthenticated = true;
+          if (splashModal) splashModal.style.display = 'none';
+          setBadges();
+          refreshTabs();
+          show('mode');
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // Check if the local Rust service is even running before popping up any modal
+    let serviceActive = false;
+    try {
+      const resp = await fetch('http://127.0.0.1:8765/status', { method: 'GET', signal: AbortSignal.timeout(600) });
+      if (resp.ok) serviceActive = true;
+    } catch (_) {}
+
+    if (!serviceActive && !window.__HALBACH_EMBEDDED_TOKEN__) {
+      // Local service is not running; stay in offline/viewer mode without modal popup
+      hardwareAuthenticated = false;
+      if (splashModal) splashModal.style.display = 'none';
+      setBadges();
+      refreshTabs();
+      show('mode');
+      return;
+    }
+
+    // Local service IS running on this PC, but we need a valid pairing token
+    hardwareAuthenticated = false;
+    setBadges();
+    refreshTabs();
+    if (splashModal && P.hardware.backend === 'real') {
+      splashModal.style.display = 'flex';
+      if (splashInput) splashInput.focus();
+    }
+
+    async function applyToken(tokenVal) {
+      const trimmed = (tokenVal || '').trim();
+      if (!trimmed) {
+        if (splashStatus) {
+          splashStatus.textContent = 'Please enter your pairing token.';
+          splashStatus.style.display = 'block';
+        }
+        return;
+      }
+      if (splashStatus) {
+        splashStatus.textContent = 'Verifying token with Rust service on 127.0.0.1:8765...';
+        splashStatus.className = 'notice';
+        splashStatus.style.display = 'block';
+      }
+      const v = await window.HHHardware.verifyToken(trimmed);
+      if (!v.ok) {
+        if (splashStatus) {
+          splashStatus.textContent = v.error || 'Invalid token or service unreachable.';
+          splashStatus.className = 'notice err';
+          splashStatus.style.display = 'block';
+        }
+        return;
+      }
+      // Token verified successfully!
+      window.HHHardware.configure({
+        baseUrl: $('rust-url')?.value || 'http://127.0.0.1:8765',
+        token: trimmed
+      });
+      $('rust-token').value = trimmed;
+      hardwareAuthenticated = true;
+      if (splashModal) splashModal.style.display = 'none';
+      Logger.info('AUTH', 'Hardware unlocked with valid pairing token');
+      hist(P, 'hardware', 'Hardware unlocked with pairing token');
+      connectionCheck = null;
+      renderHardware();
+      setBadges();
+      refreshTabs();
+      show('mode');
+    }
+
+    const btnConnect = $('splash-btn-connect');
+    if (btnConnect) {
+      btnConnect.onclick = () => applyToken(splashInput?.value);
+    }
+    const btnSkip = $('splash-btn-skip');
+    if (btnSkip) {
+      btnSkip.onclick = () => {
+        hardwareAuthenticated = false;
+        if (splashModal) splashModal.style.display = 'none';
+        setBadges();
+        refreshTabs();
+        show('mode');
+      };
+    }
+    if (splashInput) {
+      splashInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') applyToken(splashInput.value);
+      });
+    }
+  }
+
+  /* ---------------- Global Drag & Drop for Projects ---------------- */
+  window.addEventListener('dragover', e => { e.preventDefault(); });
+  window.addEventListener('drop', async e => {
+    e.preventDefault();
+    const f = e.dataTransfer?.files?.[0];
+    if (!f || !f.name.endsWith('.json')) return;
+    try {
+      const text = await f.text();
+      const o = JSON.parse(text);
+      if (o.format === 'halbach-hall-project') {
+        await loadProjectObject(o, f.name);
+      } else if (o.format === 'halbach-hall-preset') {
+        await loadPreset(o);
+      }
+    } catch (err) {
+      Logger.error('IO', 'Drop load failed: ' + err.message);
+    }
+  });
+
   /* ---------------- init ---------------- */
   window.addEventListener('beforeunload', e => { if (dirty || running) { e.preventDefault(); e.returnValue = ''; } });
   window.addEventListener('error', e => Logger.error('JS', e.message));
   window.addEventListener('unhandledrejection', e => Logger.error('JS', 'Unhandled: ' + (e.reason && e.reason.message || e.reason)));
-  buildTabs(); syncForm(); setBadges(); Logger.info('APP', 'Workstation started; select real instruments or explicit simulation'); hist(P, 'project', 'new project');
+  buildTabs(); syncForm(); setBadges(); initTokenSplash(); Logger.info('APP', 'Workstation started; select real instruments or explicit simulation'); hist(P, 'project', 'new project');
   show('mode');
   window.HH.debugState = () => ({ P, ctrl, running, connectionsOk, runner });
 })();

@@ -16,7 +16,17 @@
   };
   const EXC = { dc: 'DC current', ac: 'AC current' };
   const MAX_ROT_HZ = 1.2;
-  const isDelta = p => p.method.kind === 'fixed' && (p.method.fixed.excitation === 'delta' || (p.method.fixed.excitation === 'dc' && p.hardware.measure.dc_mode === 'delta'));
+  const isDelta = p => {
+    const isKeithleySource = ['K6220', 'K6221'].includes(p.hardware.source.model);
+    const isKeithleyVolt = ['K2182', 'K2182A'].includes(p.hardware.measure.volt);
+    return isKeithleySource && isKeithleyVolt && (
+      p.hardware.measure.dc_mode === 'delta' ||
+      p.method.fixed?.excitation === 'delta' ||
+      !p.hardware.measure.volt_addr ||
+      p.hardware.measure.volt_addr.trim() === '' ||
+      p.hardware.measure.volt_addr.trim().toUpperCase() === (p.hardware.source.address || '').trim().toUpperCase()
+    );
+  };
   const usesVoltmeter = m => m.kind === 'fixed' && ['dc', 'delta'].includes(m.fixed.excitation);
   function chirpDwell(m) { return m.cycles ? m.cycles / m.rot_hz : m.dwell_s; }
 

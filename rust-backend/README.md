@@ -39,11 +39,26 @@ powershell -File rust-backend/start.ps1
     ```
 
 ### 3. Open the UI and Pair with the Service
+
+#### How to Retrieve the Pairing Token
+The backend generates a random 64-character pairing token on first launch (persisted in `rust-backend/data/service.token`) or accepts a custom token via `--token <SECRET>`. You can retrieve it through any of the following:
+- **Terminal console**: Printed directly when the service starts:
+  ```text
+  Rust hardware service: http://127.0.0.1:8765
+  Pairing token: 9f8e7d6c5b4a392817263544...
+  ```
+- **From disk**: Read `rust-backend/data/service.token` directly or via PowerShell:
+  ```powershell
+  Get-Content rust-backend/data/service.token
+  ```
+- **Custom token flag**: Pass `--token <YOUR_TOKEN>` (minimum 16 characters) directly to the binary or `start.ps1`.
+
+#### Connecting the UI
 1. Open `app/index.html` using VS Code Live Server (or visit `http://127.0.0.1:8765` if started with `-ServeUi`, or your GitHub Pages URL).
-2. Copy the **Pairing token** printed in the PowerShell terminal (also stored locally in `rust-backend/data/service.token`).
+2. Copy the **Pairing token** retrieved above.
 3. In the UI:
    - Tab 1 (**Method**): Select the measurement principle (**DC field**, **AC field**, or **CHIRP**), excitation mode (**DC current** or **AC current**), and angular acquisition (**Steps** or **Scans** for DC field), or load a JSON preset.
-   - Tab 2 (**Devices**): Under **Local Rust service**, enter `http://127.0.0.1:8765` and paste the pairing token. Configure the instruments and addresses, then click **CHECK connections**.
+   - Tab 2 (**Devices**): Under the **Local Rust service** card, verify the URL (`http://127.0.0.1:8765`) and paste the token into the **Pairing token** field. Configure the instruments and addresses, then click **CHECK connections**.
 4. Once **CHECK connections** succeeds, **Method** and **Devices** become read-only so the validated hardware and measurement principle cannot be altered accidentally. To edit them before a run, click **Stop setup and edit configuration**; during a run, click **Pause** or **Abort**.
 5. Tab 3 (**Sample**) & Tab 4 (**Experiment setup**): Enter sample geometry, numerical method parameters (current levels, frequencies, lock-in time constant, TTL timeout, cycles/dwell), and temperature program steps. During a run, edit parameters on **Experiment setup** and click **Apply parameters** to queue them for the next measurement step.
 

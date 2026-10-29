@@ -3,18 +3,41 @@
   'use strict';
   const modes = typeof module !== 'undefined' ? require('./modes.js') : root.HH;
   function motorPosition(h) {
-    return { role: 'position', model: h.magnet.rotator, address: (h.magnet.rotator_addr || '').trim(), parent: 'motion', positionSource: 'owis', angleType: 'absolute' };
+    return {
+      role: 'position',
+      model: h.magnet.rotator,
+      address: (h.magnet.rotator_addr || '').trim(),
+      parent: 'motion',
+      positionSource: 'owis',
+      angleType: 'absolute',
+      baud: h.magnet.baud || 9600,
+      unit: h.magnet.unit || 1,
+      axis: h.magnet.axis || 1,
+      term: h.magnet.term || 'crlf',
+      countsPerTurn: h.magnet.counts_per_turn,
+      angleOffsetDeg: h.magnet.angle_offset_deg || 0,
+      dirSign: h.magnet.dir_sign || 1,
+    };
   }
   function selectedDevices(p) {
     const h = p.hardware, devices = [];
     const add = (role, model, address, extra) => { if (model) devices.push(Object.assign({ role, model, address: (address || '').trim() }, extra)); };
-    add('motion', h.magnet.rotator, h.magnet.rotator_addr, { baud: h.magnet.baud || 9600 });
+    add('motion', h.magnet.rotator, h.magnet.rotator_addr, {
+      baud: h.magnet.baud || 9600,
+      unit: h.magnet.unit || 1,
+      axis: h.magnet.axis || 1,
+      term: h.magnet.term || 'crlf',
+      countsPerTurn: h.magnet.counts_per_turn,
+      angleOffsetDeg: h.magnet.angle_offset_deg || 0,
+      dirSign: h.magnet.dir_sign || 1,
+    });
     if (h.magnet.encoder) add('position', h.magnet.encoder, h.magnet.encoder_addr, { chassis: 'cDAQ-9183', host: h.magnet.host || '', pulsesPerRev: h.magnet.encoder_ppr, positionSource: 'optical', angleType: 'relative' });
     else devices.push(Object.assign(motorPosition(h), { baud: h.magnet.baud || 9600, countsPerTurn: h.magnet.counts_per_turn }));
     add('source', h.source.model, h.source.address);
     if (modes.usesVoltmeter(p.method)) {
       const delta = modes.isDelta(p);
-      add('voltmeter', h.measure.volt, delta ? h.source.address : h.measure.volt_addr,
+      const voltAddr = delta ? (h.source.address || '').trim() : (h.measure.volt_addr || '').trim();
+      add('voltmeter', h.measure.volt, voltAddr,
         { connection: delta ? 'delta' : 'independent', parent: delta ? 'source' : null, sourceModel: h.source.model });
     } else {
       add('lockin1', h.measure.lockin1, h.measure.lockin1_addr, { lockTimeout: p.method.lock_timeout_s });
@@ -29,8 +52,9 @@
     const ds = selectedDevices(p), seen = new Map();
     for (const d of ds) {
       // An unavailable external reader is handled by the OWIS fallback below.
-      if (!d.address && d.positionSource !== 'optical') e.push(d.role + ': address/channel is required');
-      const key = d.address.toUpperCase();
+      // Delta voltmeter automatically inherits the 6220/6221 source address.
+      if (!d.address && d.positionSource !== 'optical' && d.connection !== 'delta') e.push(d.role + ': address/channel is required');
+      const key = (d.address || '').toUpperCase();
       if (key && !d.parent) {
         const sharedMfli = d.model === 'MFLI' && ((d.role.startsWith('lockin') && seen.get(key) === 'source' && p.hardware.source.model === 'MFLI') || (d.role === 'source' && String(seen.get(key)).startsWith('lockin')));
         if (seen.has(key) && !sharedMfli) e.push(d.role + ' and ' + seen.get(key) + ' share an address');

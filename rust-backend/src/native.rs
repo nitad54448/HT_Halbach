@@ -200,12 +200,8 @@ mod windows {
                     address = format!("ASRL{port}::INSTR");
                 }
             }
-            if !["GPIB", "TCPIP", "USB", "ASRL"]
-                .iter()
-                .any(|p| address.to_uppercase().starts_with(p))
-                || !address.contains("::")
-            {
-                return Err("Use a VISA resource or OWIS COM port".into());
+            if address.is_empty() {
+                return Err("Device address or VISA alias is required".into());
             }
             let addr = cstring(&address)?;
             let mut handle = 0;
