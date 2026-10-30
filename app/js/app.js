@@ -14,10 +14,10 @@
   let P = newProject(), dirty = false;
   const configurationSnapshot = () => JSON.parse(JSON.stringify({sample:P.sample,method:P.method,hardware:P.hardware,tempProgram:P.tempProgram}));
   function nextRunId() { let n=P.runs.length+1;while(P.runs.some(r=>r.id==='run-'+String(n).padStart(3,'0')))n++;return 'run-'+String(n).padStart(3,'0'); }
-  let connectionCheck = null, checking = false;
+  let connectionCheck = null, checking = false, referenceChecking=false;
   const connectionKey = () => JSON.stringify([P.hardware, HH.principle(P.method)]);
   const connectionsOk = () => connectionCheck?.ok && connectionCheck.key === connectionKey();
-  let configurationReleased = false, appliedMethod = null, parameterBusy = false;
+  let configurationReleased = false, appliedMethod = null, appliedProgram=null, parameterBusy = false;
   let realJobId=null;
   const paused = () => running && runner?.state === 'paused';
   const configurationLocked = () => checking || (running ? !paused() : connectionsOk() && !configurationReleased);
@@ -75,6 +75,8 @@
   function show(id) {
     if (!reachable(id)) return;
     current = id;
+    const helpSections={mode:'methods',hardware:'devices',sample:'geometry',temp:'temperature',run:'run-control',inspect:'inspection',analysis:'analysis',history:'projects',log:'troubleshooting',project:'projects'};
+    $('help-link').href='help.html#'+(helpSections[id]||'introduction');
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'p-' + id));
     Logger.verbose('UI', 'Tab ' + id);
     renderPage(id); refreshTabs(); window.scrollTo(0, 0);
@@ -89,6 +91,7 @@
   /* ---------------- data binding ---------------- */
   function getPath(o, p) { return p.split('.').reduce((a, k) => a?.[k], o); }
   function setPath(o, p, v) { const ks = p.split('.'); const last = ks.pop(); ks.reduce((a, k) => a[k], o)[last] = v; }
+  function positiveFieldAngle() { return -(P.hardware.magnet.angle_offset_deg || 0) / (P.hardware.magnet.dir_sign || 1); }
   function buildOptions() {
     document.querySelectorAll('select[data-opts]').forEach(sel => {
       if (sel.childElementCount) return;
@@ -101,6 +104,7 @@
     document.querySelectorAll('[data-bind]').forEach(el => { const v = getPath(P, el.dataset.bind); el.value = v === null || v === undefined ? '' : String(v); });
     $('f-levels').value = P.method.levels_mA.join(', ');
     $('f-dc-currents').value = P.method.rotating.currents_mA.join(', ');
+    $('positive-field-angle').value = positiveFieldAngle();
     const bridge=window.HHHardware.settings?.();
     if(bridge) $('rust-url').value=bridge.baseUrl;
   }
@@ -113,10 +117,15 @@
     if ('bool' in el.dataset) v = v === 'true';
     else if ('num' in el.dataset) { if (v === '' && 'nullable' in el.dataset) v = null; else { v = Number(v); if (!isFinite(v)) { el.classList.add('bad'); return; } } }
     el.classList.remove('bad');
-    const old = getPath(P, path); setPath(P, path, v);
+    const old = getPath(P, path), plusBAngle = positiveFieldAngle(); setPath(P, path, v);
+    if (path === 'hardware.magnet.dir_sign') P.hardware.magnet.angle_offset_deg = -v * plusBAngle;
+    if (path === 'hardware.source.model') {
+      HH.normalizeSourceAddress(P.hardware.source);
+      document.querySelector('[data-bind="hardware.source.address"]').value = P.hardware.source.address;
+    }
     if (path.startsWith('hardware.') || principlePath(path)) { connectionCheck = null; ctrl = null; simDev = null; }
     if (path === 'hardware.temperature' && v === 'off') {
-      P.tempProgram = P.tempProgram.filter(s => !['goto', 'heater_off'].includes(s.type));
+      P.tempProgram = P.tempProgram.filter(s => !['goto', 'scan', 'heater_off'].includes(s.type));
       if (!P.tempProgram.length) P.tempProgram = [{ type: 'measure', label: 'Room temp' }];
     }
     if (old !== v) { hist(P, 'config', `${path}: ${old} → ${v}`); Logger.verbose('CFG', `${path} = ${v} (was ${old})`); dirty = true; }
@@ -146,13 +155,14 @@
     for (const [k,v] of Object.entries(o.method)) if (!['fixed','rotating'].includes(k)) base.method[k] = v;
     for (const k of ['tempController','magnet','source','measure']) Object.assign(base.hardware[k], o.hardware?.[k] || {});
     for (const k of ['backend','temperature']) if (o.hardware?.[k]) base.hardware[k] = o.hardware[k];
+    HH.normalizeSourceAddress(base.hardware.source);
     if (!Array.isArray(base.method.levels_mA) || !Array.isArray(base.method.rotating.currents_mA)) throw new Error('Preset current levels must be arrays.');
     if(base.method.fixed.excitation==='delta') {base.method.fixed.excitation='dc';base.hardware.measure.dc_mode='delta';}
     const errors = HH.principleErrors(base.method);
     if (errors.length) throw new Error('Invalid preset: ' + errors.join(' '));
     P.method = base.method; P.hardware = base.hardware;
     if (P.hardware.temperature === 'off') {
-      P.tempProgram = P.tempProgram.filter(s => !['goto', 'heater_off'].includes(s.type));
+      P.tempProgram = P.tempProgram.filter(s => !['goto', 'scan', 'heater_off'].includes(s.type));
       if (!P.tempProgram.length) P.tempProgram = [{ type: 'measure', label: 'Room temp' }];
     }
     connectionCheck = null; ctrl = null; simDev = null; dirty = true;
@@ -201,9 +211,20 @@
   };
 
   /* ---------------- hardware ---------------- */
+  $('positive-field-angle').addEventListener('change', () => {
+    if (!canMeasure() || configurationLocked()) { syncForm(); return; }
+    const input = $('positive-field-angle'), angle = input.valueAsNumber;
+    if (!Number.isFinite(angle)) { input.classList.add('bad'); return; }
+    input.classList.remove('bad');
+    P.hardware.magnet.angle_offset_deg = -angle * (P.hardware.magnet.dir_sign || 1);
+    dirty = true; connectionCheck = null; ctrl = null; simDev = null;
+    hist(P, 'config', `+B stage angle set to ${angle}°`);
+    renderPage(current); refreshTabs();
+  });
   $('rust-url').addEventListener('change',()=>{
+    if (!window.HHHardware.isLocalPage || configurationLocked()) { syncForm(); return; }
     try{window.HHHardware.configure({baseUrl:$('rust-url').value});hardwareAuthenticated=false;connectionCheck=null;ctrl=null;simDev=null;connectWorkstation();}
-    catch(e){$('rust-settings-status').textContent=e.message;}
+    catch(e){$('access-status').textContent=e.message;}
   });
   document.querySelectorAll('#hw-subtabs button').forEach(b => b.onclick = () => {
     document.querySelectorAll('#hw-subtabs button').forEach(x => x.classList.toggle('active', x === b));
@@ -211,7 +232,6 @@
   });
   function renderHardware() {
     const h = P.hardware, src = HH.SOURCES[h.source.model], lines = [];
-    $('rust-settings').hidden=h.backend!=='real';
     $('src-caps').textContent = src ? `Supports: ${[src.dc && 'DC', src.ac && 'AC'].filter(Boolean).join(' and ')}` : '';
     const name = (t, k) => t[k] ? (typeof t[k] === 'string' ? t[k] : t[k].name) : null;
     const row = (type, what, ok) => lines.push(`<tr><td>${esc(type)}</td><td>${what ? esc(what) : '<span class="muted">none</span>'}</td></tr>`);
@@ -226,7 +246,7 @@
     if (['SR830', 'AMETEK7230', 'MFLI'].includes(h.measure.lockin1) && h.measure.lockin1 === h.measure.lockin2 && h.measure.lockin1_addr && h.measure.lockin1_addr.trim().toUpperCase() === h.measure.lockin2_addr.trim().toUpperCase()) warn.push(`Two ${HH.LOCKIN[h.measure.lockin1]}s share the same address.`);
     $('measure-msg').innerHTML = warn.map(x => `<div class="notice err">${esc(x)}</div>`).join('');
     for(const k of ['lockin1','lockin2']) document.querySelector(`[data-bind="hardware.measure.${k}_addr"]`).placeholder = h.measure[k]==='AMETEK7230' ? '192.168.1.100:50000' : h.measure[k]==='MFLI' ? 'dev1234 or 127.0.0.1:8004/dev1234' : 'GPIB0::8::INSTR';
-    document.querySelector('[data-bind="hardware.source.address"]').placeholder = h.source.model === 'MFLI' ? 'dev1234 or 127.0.0.1:8004/dev1234' : 'e.g. GPIB0::12::INSTR or IP';
+    document.querySelector('[data-bind="hardware.source.address"]').placeholder = h.source.model === 'MFLI' ? 'dev1234 or 127.0.0.1:8004/dev1234' : h.source.model === 'K6220' ? 'GPIB0::6::INSTR' : 'e.g. GPIB0::12::INSTR or VISA alias';
     if ([h.measure.lockin1,h.measure.lockin2,h.source.model].includes('MFLI')) $('measure-msg').innerHTML+='<p class="muted">Zurich Instruments MFLI: enter the LabOne device ID (e.g. dev1234) or Data Server endpoint host:8004/dev1234.</p>';
     if ([h.measure.lockin1,h.measure.lockin2].includes('AMETEK7230')) $('measure-msg').innerHTML+='<p class="muted">Ametek 7230: enter the Ethernet host/IP or host:50000.</p>';
     setBadges();
@@ -269,10 +289,10 @@
     } finally { checking = false; renderHardware(); refreshTabs(); }
   };
   $('check-reference').onclick = async () => {
-    if (!canMeasure() || running || checking) return;
+    if (!canMeasure() || running || checking || referenceChecking) return;
     const ds = HH.selectedDevices(P).filter(d => d.role.startsWith('lockin'));
     if (!ds.length || HH.connectionErrors(P).length) { $('reference-result').textContent = 'Configure a lock-in and its address first.'; return; }
-    $('check-reference').disabled = true;
+    referenceChecking=true;$('check-reference').disabled = true;
     $('reference-result').textContent = 'Waiting for TTL reference lock…';
     try {
       for (const d of ds) {
@@ -280,7 +300,7 @@
         $('reference-result').textContent = (P.hardware.backend === 'simulation' ? 'SIMULATED: ' : '') + d.model + ' locked at ' + r.frequencyHz + ' Hz';
       }
     } catch (e) { $('reference-result').textContent = e.message; Logger.error('REF', e.message); }
-    finally { $('check-reference').disabled = false; }
+    finally { referenceChecking=false;setBadges(); }
   };
   function setBadges() {
     const isOfflineViewer = !canMeasure();
@@ -291,8 +311,13 @@
       : 'Real instruments';
     $('b-mode').className = 'badge ' + (isOfflineViewer ? '' : P.hardware.backend === 'simulation' ? 'sim' : 'ok');
     $('actual-values-panel').hidden = isOfflineViewer || !['hardware','run'].includes(current);
+    if (['hardware','run'].includes(current)) {
+      const slot = $(current === 'hardware' ? 'hardware-readings' : 'run-readings');
+      if ($('actual-values-panel').parentElement !== slot) slot.append($('actual-values-panel'));
+    }
     $('access-title').textContent = accessChecking ? 'Connecting to the local workstation…' : isOfflineViewer ? 'Project inspection & data analysis' : 'Measurement workstation';
-    $('access-description').textContent = accessChecking ? 'Checking for a Rust service on this computer.' : isOfflineViewer ? 'Open a saved project to inspect raw data, adjust analysis inputs and export physical properties. Acquisition is available on the measurement PC.' : 'Local service connected. Choose a method, verify instruments and configure your measurement.';
+    $('access-description').textContent = accessChecking ? 'Checking for a Rust service on this computer.' : isOfflineViewer ? 'Open a saved project to inspect raw data, adjust analysis inputs and export physical properties. Acquisition is available on the measurement PC.' : 'Choose a method, verify instruments and configure your measurement.';
+    $('workstation-controls').hidden = !window.HHHardware.isLocalPage;
     $('workstation-reconnect').hidden = !window.HHHardware.isLocalPage;
     $('workstation-reconnect').disabled = accessChecking || running || checking;
     $('project-context').textContent = `${P.sample.id || 'Untitled project'} · ${P.runs.length} run${P.runs.length === 1 ? '' : 's'}`;
@@ -302,16 +327,24 @@
     document.querySelectorAll('[data-bind]').forEach(el => el.disabled = el.closest('#p-mode,#p-hardware') ? configurationLocked() : el.dataset.bind.startsWith('sample.') ? running || checking : checking);
     if(running) document.querySelector('[data-bind="hardware.backend"]').disabled=true;
     document.querySelectorAll('#f-levels,#f-dc-currents').forEach(el=>el.disabled=checking);
-    document.querySelectorAll('#p-temp .toolbar input,#p-temp .toolbar select,#p-temp .toolbar button').forEach(el=>el.disabled=running||checking);
+    document.querySelectorAll('#p-temp .toolbar input,#p-temp .toolbar select,#p-temp .toolbar button,#p-temp .program-builder input,#p-temp .program-builder select,#p-temp .program-builder button').forEach(el=>el.disabled=checking);
+    $('add-sweep').disabled=checking||P.hardware.temperature!=='control'||($('sw-mode').value==='scan'&&!supportsTemperatureScan());
     $('save-preset').disabled=checking; $('preset-file').disabled=configurationLocked();
-    $('rust-url').disabled=configurationLocked();
+    $('rust-url').disabled=!window.HHHardware.isLocalPage||configurationLocked()||running||accessChecking;
+    $('positive-field-angle').disabled=isOfflineViewer||configurationLocked();
+    document.querySelectorAll('#hw-subtabs button').forEach(button=>button.disabled=!canMeasure());
+    $('check-reference').disabled=!canMeasure()||running||checking||referenceChecking||HH.connectionErrors(P).length>0||HH.usesVoltmeter(P.method);
     document.querySelectorAll('#mode-cards button').forEach(button=>button.disabled=configurationLocked());
-    document.querySelectorAll('[data-step-index]').forEach(input=>input.disabled=running&&Number(input.dataset.stepIndex)<=(runner?.index??stepState.findIndex(x=>x==='start')));
+    document.querySelectorAll('[data-step-index]').forEach(input=>input.disabled=checking||(running&&Number(input.dataset.stepIndex)<(runner?.index??0)));
+    document.querySelectorAll('[data-program-delete]').forEach(button=>button.disabled=checking||(running&&Number(button.dataset.programDelete)<=activeStepIndex()));
+    document.querySelectorAll('[data-program-move]').forEach(button=>{const i=Number(button.dataset.programMove),next=i+Number(button.dataset.delta);button.disabled=checking||next<0||next>=P.tempProgram.length||(running&&(i<=activeStepIndex()||next<=activeStepIndex()));});
+    document.querySelectorAll('[data-program-index]').forEach(row=>{const i=Number(row.dataset.programIndex);row.classList.toggle('cur',running&&i===activeStepIndex());row.classList.toggle('donest',running&&i<activeStepIndex());});
     document.querySelectorAll('[data-release-config]').forEach(button=>{button.hidden=!connectionsOk()||configurationReleased;button.disabled=running||checking;});
     const lockMessage=checking?'Checking connections…':configurationLocked()?'Validated configuration is read only. Pause or stop to change the method or devices.':'Choose the method and devices, then check connections.';
     $('method-lock').textContent=lockMessage;$('device-lock').textContent=lockMessage;
+    $('method-lock').hidden=!configurationLocked();$('device-lock').hidden=!configurationLocked();
     $('apply-parameters').disabled=checking||parameterBusy||HH.modeErrors(P).length>0||progErrors().length>0;
-    $('r-pause').disabled=!running||runner?.state==='pausing'||(paused()&&(!connectionsOk()||HH.modeErrors(P).length>0));
+    $('r-pause').disabled=!running||runner?.state==='pausing'||(paused()&&(!connectionsOk()||HH.modeErrors(P).length>0||progErrors().length>0));
     $('r-speed').disabled = running || P.hardware.backend === 'real';
     if (isOfflineViewer) document.querySelectorAll('#p-mode button,#p-mode input,#p-mode select,#p-hardware button,#p-hardware input,#p-hardware select,#p-sample input,#p-sample textarea,#p-temp button,#p-temp input,#p-temp select,#p-run button').forEach(el => el.disabled = true);
     for (const id of ['btn-quick-zero','btn-set-zero-pos','cal-50000','cal-50040']) $(id).disabled = isOfflineViewer || configurationLocked();
@@ -322,7 +355,7 @@
     const c = P.hardware.tempController;
     try {
       simDev = new HH.SimLakeShore(c.model, 295, 7);
-      const d = new HH.LakeShore(c.model, simDev, { input: c.input, loop: c.loop });
+      const d = new HH.LakeShore(c.model, simDev, { input: c.input, loop: c.loop, minRateKmin:c.minRateKmin });
       const id = await d.identify(); ctrl = d;
       if (P.hardware.temperature === 'read') ctrl = { readK: () => d.readK(), getSetpoint: async () => null, heaterOff: async () => {} };
       $('ls-info').textContent = `${id.manufacturer} ${id.model}, s/n ${id.serial}, fw ${id.firmware} — SIMULATED at ${c.address}`;
@@ -337,98 +370,24 @@
   /* ---------------- mode / sample ---------------- */
   function methodErrors() { return HH.modeErrors(P).concat(HH.sampleErrors(P)); }
   function renderMode() {
-    const av = HH.availability(P.hardware), m = P.method, box = $('mode-cards'); box.replaceChildren();
-    const MODE_META = {
-      fixed: {
-        pill: 'DC Field',
-        icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="8" rx="1.5"/><rect x="15" y="3" width="6" height="8" rx="1.5"/><path d="M3 7h6M15 7h6"/><path d="M6 11v3a6 6 0 0 0 12 0v-3"/><path d="M3 21h18M7 21v-3M12 21v-6M17 21v-3"/></svg>',
-        chips: ['Steps & settle', 'Angular scan', 'DC / AC source'],
-      },
-      rotating: {
-        pill: 'AC Field',
-        icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"/><path d="M8 12c1.5-3 3-3 4 0s2.5 3 4 0"/></svg>',
-        chips: ['Continuous rotation', 'Lock-in detection', 'Sideband 2ω'],
-      },
-      chirp: {
-        pill: 'CHIRP',
-        icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h3l2.5-7 3.5 14 3.5-9 2.5 6 3-4h4"/><circle cx="7.5" cy="6" r="1.5" fill="currentColor"/><circle cx="11" cy="20" r="1.5" fill="currentColor"/><circle cx="14.5" cy="11" r="1.5" fill="currentColor"/></svg>',
-        chips: ['Current hopping', 'Interleaved rot', 'Calibrated angle'],
-      },
-    };
-
-    for (const [k, md] of Object.entries(HH.MODES)) {
-      const a = av[k], b = document.createElement('button');
-      const isSel = m.kind === k;
-      b.type = 'button';
-      b.className = `mode-card mode-${k}` + (isSel ? ' sel' : '');
-      b.disabled = configurationLocked();
-      const meta = MODE_META[k];
-      const why = a.ok ? '' : md.variants.map(v => `${HH.EXC[v]}: needs ${a.variants[v].missing.join(', ')}`).join(' · ');
-      b.innerHTML = `
-        <div class="mode-card-header">
-          <div class="mode-icon-box">${meta.icon}</div>
-          <div class="mode-badges">
-            <span class="mode-pill">${meta.pill}</span>
-            ${isSel
-              ? `<span class="mode-active-pill"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Selected</span>`
-              : `<span class="mode-ref">${esc(md.ref)}</span>`}
-          </div>
-        </div>
-        <div class="mode-card-title">${esc(md.label)}</div>
-        <div class="mode-card-desc">${esc(md.text)}</div>
-        <div class="mode-chips">
-          ${meta.chips.map(c => `<span class="mode-chip">${esc(c)}</span>`).join('')}
-        </div>
-        ${why ? `<div class="mode-why">⚠️ ${esc(why)}</div>` : ''}
-        <div class="mode-card-footer">
-          <span class="mode-indicator">
-            <span class="mode-indicator-dot"></span>
-            <span>${isSel ? 'Active Method' : 'Click to Select'}</span>
-          </span>
-          <span class="mode-arrow">${isSel ? '✓' : '→'}</span>
-        </div>
-      `;
-      b.onclick = () => {
-        if (configurationLocked()) return;
-        const old = m.kind; m.kind = k;
-        connectionCheck = null; ctrl = null; simDev = null;
-        hist(P, 'config', `mode: ${old || 'none'} → ${k}`); dirty = true; syncForm(); renderMode(); refreshTabs();
-      };
-      box.append(b);
+    const av=HH.availability(P.hardware),m=P.method,box=$('mode-cards');
+    const focusedId=box.contains(document.activeElement)?document.activeElement.id:null;
+    // Move the existing bound controls; rebuilding them would lose their listeners.
+    const options={};
+    for(const key of Object.keys(HH.MODES)){options[key]=$('principle-'+key);options[key].remove();}
+    box.replaceChildren();
+    for(const [key,method] of Object.entries(HH.MODES)) {
+      const panel=document.createElement('div');panel.className='method-panel'+(m.kind===key?' sel':'');panel.dataset.method=key;
+      const button=document.createElement('button');button.type='button';button.className='mode-card method-option'+(m.kind===key?' sel':'');
+      button.id='method-'+key;button.setAttribute('aria-controls','principle-'+key);button.setAttribute('aria-expanded',m.kind===key);
+      button.setAttribute('aria-pressed',m.kind===key);button.disabled=configurationLocked();
+      button.innerHTML=`<span class="method-radio" aria-hidden="true"></span><span class="method-name">${esc(method.label)}</span><span class="method-description">${esc(method.text)}</span><span class="method-state">${m.kind===key?'Selected':av[key].ok?'Devices configured':'Configure devices'}</span>`;
+      button.onclick=()=>{if(!canMeasure()||configurationLocked())return;const old=m.kind;m.kind=key;connectionCheck=null;ctrl=null;simDev=null;hist(P,'config',`Method: ${old||'none'} → ${key}`);dirty=true;syncForm();renderMode();refreshTabs();};
+      options[key].hidden=m.kind!==key;panel.append(button,options[key]);box.append(panel);
     }
-
-    const presetCard = document.createElement('button');
-    presetCard.type = 'button';
-    presetCard.className = 'mode-card mode-preset';
-    presetCard.id = 'preset-card';
-    presetCard.disabled = configurationLocked();
-    presetCard.innerHTML = `
-      <div class="mode-card-header">
-        <div class="mode-icon-box">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
-        </div>
-        <div class="mode-badges">
-          <span class="mode-pill">FILE / PRESET</span>
-          <span class="mode-ref">JSON</span>
-        </div>
-      </div>
-      <div class="mode-card-title">Load data or preset</div>
-      <div class="mode-card-desc">Open previously acquired experimental data runs, or import a saved method and instrument preset.</div>
-      <div class="mode-chips">
-        <span class="mode-chip">Acquired data</span>
-        <span class="mode-chip">Method preset</span>
-        <span class="mode-chip">JSON import</span>
-      </div>
-      <div class="mode-card-footer">
-        <span class="mode-indicator">
-          <span class="mode-indicator-dot"></span>
-          <span>Open JSON file</span>
-        </span>
-        <span class="mode-arrow">↑</span>
-      </div>
-    `;
-    presetCard.onclick = () => $('preset-file').click();
-    box.append(presetCard);
+    const preset=document.createElement('button');preset.type='button';preset.id='preset-card';preset.className='mode-card method-option preset-option';
+    preset.disabled=configurationLocked();preset.innerHTML='<span aria-hidden="true">+</span><span class="method-name">Load a method preset</span><span class="method-description">Import saved method and instrument settings from JSON.</span><span class="method-state">Browse…</span>';
+    preset.onclick=()=>$('preset-file').click();box.append(preset);
     document.querySelectorAll('.mode-panel').forEach(p => p.hidden = p.id !== 'mp-' + m.kind);
     for(const k of ['fixed','rotating','chirp']) $('principle-'+k).hidden=m.kind!==k;
     document.querySelector('[data-bind="method.tc_ms"]').closest('.card').hidden=!m.kind||HH.usesVoltmeter(m);
@@ -444,9 +403,10 @@
     const parameterErrors=m.kind?HH.modeErrors(P):[], parameterWarnings=m.kind?HH.modeWarnings(P):[];
     $('experiment-msg').innerHTML=parameterErrors.map(x=>`<div class="notice err">${esc(x)}</div>`).join('')+parameterWarnings.map(x=>`<div class="notice">${esc(x)}</div>`).join('');
     const e = HH.principleErrors(m), w = [];
-    $('mode-msg').innerHTML = (m.kind ? '' : '<div class="notice">Select a mode.</div>') + e.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + w.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
+    $('mode-msg').innerHTML = (m.kind ? e.map(x => `<div class="notice err">${esc(x)}</div>`).join('') : '') + w.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
       (m.kind && !e.length ? '<div class="notice ok">Select compatible devices next. Set numerical parameters in Experiment setup.</div>' : '');
     setBadges();
+    if(focusedId)$(focusedId)?.focus({preventScroll:true});
   }
   function renderSample() {
     const w = []; if (P.sample.tilt_deg !== 0) w.push('Non-zero tilt: guide recommends validating zero-tilt ordinary Hall first.');
@@ -455,174 +415,106 @@
 
   /* ---------------- temperature program ---------------- */
   const tl = () => P.hardware.tempController;
+  const thermalLimits=()=>({maxK:tl().maxK,maxRateKmin:tl().maxRateKmin,minRateKmin:tl().minRateKmin??0.1});
+  const activeStepIndex=()=>runner?.index??0;
+  const supportsTemperatureScan=()=>P.method.kind==='chirp'||P.method.kind==='rotating'||(P.method.kind==='fixed'&&P.method.fixed.acq==='scan');
   function progErrors() {
-    if (P.hardware.temperature === 'off') {
-      if (!P.tempProgram.length) return ['Measurement program is empty. Add a measurement step.'];
-      const e = [];
-      if (P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type))) {
-        e.push('Temperature control is OFF. Remove temperature steps (goto / heater off) or enable Temperature control in Devices.');
-      }
-      return e;
-    }
-    const e = HH.validateProgram(P.tempProgram, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
-    if (P.hardware.temperature !== 'control' && P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type))) e.push('Temperature OFF/read only permits measurement and soak steps. Remove temperature control steps or enable control.');
-    return e;
+    const errors=HH.validateProgram(P.tempProgram,thermalLimits());
+    if(P.hardware.temperature!=='control'&&P.tempProgram.some(s=>['goto','scan','heater_off'].includes(s.type)))errors.push('Enable temperature control to use temperature steps or scans.');
+    if(P.tempProgram.some(s=>s.type==='scan')&&!supportsTemperatureScan())errors.push('A temperature scan requires angular scan, AC field or CHIRP acquisition.');
+    if(P.hardware.tempController.model==='LS332'&&(tl().minRateKmin??0.1)<0.1)errors.push('Model 332 minimum ramp rate is 0.1 K/min.');
+    return errors;
   }
+  function programEdited(text) {dirty=true;hist(P,'program',text);$('parameter-status').textContent=running?'Pending edits. Apply conditions & program to update the run.':'Program edited.';}
   function renderProgram() {
     renderMode();
-    const isTempOff = P.hardware.temperature === 'off';
-    const isTempControl = P.hardware.temperature === 'control';
-
-    // If temperature is OFF, sanitize program to remove goto/heater_off steps
-    if (isTempOff) {
-      const hasTempSteps = P.tempProgram.some(s => ['goto', 'heater_off'].includes(s.type));
-      if (hasTempSteps) {
-        P.tempProgram = P.tempProgram.filter(s => !['goto', 'heater_off'].includes(s.type));
-      }
-      if (P.tempProgram.length === 0) {
-        P.tempProgram = [{ type: 'measure', label: 'Room temp' }];
-      }
+    const control=P.hardware.temperature==='control';
+    $('prog-heading').textContent=control?'Temperature & acquisition program':'Acquisition program';
+    $('prog-intro').textContent=control?'Stabilized steps support a measurement count at each temperature. Slow scans acquire repeatedly during heating or cooling, recording the mean and range of measured temperature for every acquisition.':'Set the number of measurements and the wait between them. Temperature can be monitored without controlling it.';
+    $('prog-temp-off-notice').hidden=P.hardware.temperature!=='off';
+    $('prog-sweep-group').hidden=!control;$('prog-preview-card').hidden=!control;
+    $('program-builder-title').textContent=control?'Build a temperature segment':'Acquisition sequence';$('sw-description').hidden=!control;
+    $('prog-grid').className=control?'grid g2':'grid';
+    const sel=$('add-type');if(!sel.childElementCount)for(const [key,spec]of Object.entries(HH.STEP_TYPES))sel.add(new Option(spec.label,key));
+    for(const option of sel.options)option.disabled=(!control&&['goto','scan','heater_off'].includes(option.value))||(option.value==='scan'&&!supportsTemperatureScan());
+    if(sel.selectedOptions[0]?.disabled)sel.value='measure';
+    const scanning=$('sw-mode').value==='scan';
+    $('sw-step-field').hidden=scanning;$('sw-count-field').hidden=scanning;
+    $('sw-description').textContent=scanning?'Stabilize the start temperature, then acquire complete measurements while ramping to the end temperature. Acquisition settings apply to the next complete measurement.':'Stabilize each temperature, then repeat the measurement the requested number of times.';
+    if(scanning) {
+      const streaming=(P.method.kind==='fixed'&&P.method.fixed.acq==='scan'&&!HH.isDelta(P))||(P.method.kind==='rotating'&&P.method.rotating.excitation==='ac'&&!P.method.rotating.background);
+      $('sw-description').textContent+=streaming?' With zero wait, this method keeps excitation and rotation running across saved measurement windows.':' This method retains its required current switching, direction changes or background sequence.';
     }
-
-    const heading = $('prog-heading');
-    if (heading) heading.textContent = isTempOff ? 'Measurement sequence (Ambient)' : 'Temperature program';
-
-    const intro = $('prog-intro');
-    if (intro) {
-      intro.textContent = isTempOff
-        ? 'Measurements run at ambient room temperature without heating or stabilization.'
-        : 'Build a temperature program from start, steps, and end temperatures (including multi-segment ramps and cooling).';
-    }
-
-    const tempOffNotice = $('prog-temp-off-notice');
-    if (tempOffNotice) tempOffNotice.hidden = !isTempOff;
-
-    const sweepGroup = $('prog-sweep-group');
-    if (sweepGroup) sweepGroup.hidden = !isTempControl;
-
-    const previewCard = $('prog-preview-card');
-    if (previewCard) previewCard.hidden = !isTempControl;
-
-    const progGrid = $('prog-grid');
-    if (progGrid) {
-      progGrid.className = isTempControl ? 'grid g2' : 'grid';
-    }
-
-    const sel = $('add-type'); if (!sel.childElementCount) for (const [k, v] of Object.entries(HH.STEP_TYPES)) sel.add(new Option(v.label, k));
-    for (const o of sel.options) o.disabled = !isTempControl && ['goto', 'heater_off'].includes(o.value);
-    if (sel.selectedOptions[0]?.disabled) sel.value = 'measure';
-    $('add-sweep').disabled = running || !isTempControl;
-    const t = $('prog-table'), cols = { goto: ['T', 'rate', 'range', 'min_stab_s', 'max_stab_s', 'avg_s', 'tol', 'mean_tol', 'esd_tol'], soak: ['seconds'], measure: ['label'], heater_off: [] };
-    const hdr = { T: 'T (K)', rate: 'Rate (K/min)', range: 'Heater', min_stab_s: 'Min stab (s)', max_stab_s: 'Max stab (s)', avg_s: 'Avg win (s)', tol: 'Max |ΔT| (K)', mean_tol: 'Mean |ΔT| (K)', esd_tol: 'ESD σ_T (K)', seconds: 'Seconds', label: 'Label' };
-    t.innerHTML = '<tr><th>#</th><th>Step</th><th>Parameters</th><th></th></tr>';
-    P.tempProgram.forEach((s, i) => {
-      const tr = t.insertRow(); tr.insertCell().textContent = i + 1; tr.insertCell().textContent = HH.STEP_TYPES[s.type].label;
-      const c = tr.insertCell(); c.style.whiteSpace = 'normal';
-      cols[s.type].forEach(k => {
-        const w = document.createElement('label'); w.style.cssText = 'display:inline-block;margin-right:12px;font-size:11px;color:#9db0c0'; w.append(hdr[k] + ' ');
-        let inp;
-        if (k === 'range') { inp = document.createElement('select'); ['low', 'medium', 'high'].forEach(r => inp.add(new Option(r, r))); }
-        else { inp = document.createElement('input'); inp.type = k === 'label' ? 'text' : 'number'; inp.step = 'any'; inp.style.width = k === 'label' ? '120px' : '75px'; }
-        let val = s[k];
-        if (val === undefined) {
-          if (k === 'mean_tol') val = s.tol;
-          else if (k === 'esd_tol') val = s.tol;
-          else if (k === 'avg_s') val = s.window_s || 30;
-          else if (k === 'min_stab_s') val = s.window_s || 60;
-          else if (k === 'max_stab_s') val = s.timeout_s || 3600;
-        }
-        inp.value = val; inp.dataset.stepIndex=i; inp.disabled = running && i <= (runner?.index??stepState.findIndex(x=>x==='start'));
-        inp.onchange = () => { const old = s[k]; s[k] = k === 'label' || k === 'range' ? inp.value : Number(inp.value); hist(P, 'program', `step ${i + 1} ${k}: ${old} → ${s[k]}`); dirty = true; renderProgram(); refreshTabs(); };
-        w.append(inp); c.append(w);
+    $('add-sweep').disabled=!control||checking||(scanning&&!supportsTemperatureScan());
+    const cols={goto:['T','rate','range','min_stab_s','max_stab_s','avg_s','tol','mean_tol','esd_tol'],scan:['T','rate','range','interval_s','endpoint_tol','timeout_s','label'],soak:['seconds'],measure:['repeats','interval_s','label'],heater_off:[]};
+    const names={T:'Target (K)',rate:'Rate (K/min)',range:'Heater',min_stab_s:'Min stable (s)',max_stab_s:'Timeout (s)',avg_s:'Window (s)',tol:'Max |ΔT| (K)',mean_tol:'Mean |ΔT| (K)',esd_tol:'Std dev (K)',seconds:'Duration (s)',repeats:'Measurements',interval_s:'Wait between (s)',endpoint_tol:'Endpoint tol (K)',timeout_s:'Timeout (s)',label:'Label'};
+    const table=$('prog-table');table.innerHTML='<tr><th>#</th><th>Operation</th><th>Conditions</th><th>Edit sequence</th></tr>';
+    P.tempProgram.forEach((step,i)=>{
+      const frozen=running&&i<activeStepIndex(),row=table.insertRow();row.dataset.programIndex=i;row.className=frozen?'donest':running&&i===activeStepIndex()?'cur':'';
+      row.insertCell().textContent=i+1;row.insertCell().textContent=HH.STEP_TYPES[step.type]?.label||step.type;
+      const cell=row.insertCell();cell.style.whiteSpace='normal';const fields=document.createElement('div');fields.className='step-fields';cell.append(fields);
+      (cols[step.type]||[]).forEach(key=>{
+        const label=document.createElement('label');label.append(names[key]);let input;
+        if(key==='range'){input=document.createElement('select');for(const value of ['low','medium','high'])input.add(new Option(value,value));}
+        else{input=document.createElement('input');input.type=key==='label'?'text':'number';input.step=key==='repeats'?'1':'any';if(key==='repeats')input.min='1';}
+        const fallback={mean_tol:step.tol,esd_tol:step.tol,avg_s:step.window_s??30,min_stab_s:step.window_s??60,max_stab_s:step.timeout_s??3600,repeats:1,interval_s:0,label:''};
+        input.value=step[key]??fallback[key]??'';input.dataset.stepIndex=i;input.disabled=frozen||checking;
+        input.onchange=()=>{if(running&&i<activeStepIndex())return;step[key]=['range','label'].includes(key)?input.value:Number(input.value);programEdited(`Step ${i+1}: ${key} = ${step[key]}`);renderProgramSummary();setBadges();refreshTabs();};
+        label.append(input);fields.append(label);
       });
-      const ac = tr.insertCell();
-      [['↑', -1], ['↓', 1]].forEach(([l, d]) => { const b = document.createElement('button'); b.className = 'secondary'; b.textContent = l; b.disabled = running || i + d < 0 || i + d >= P.tempProgram.length; b.onclick = () => { const a = P.tempProgram; [a[i], a[i + d]] = [a[i + d], a[i]]; hist(P, 'program', `moved step ${i + 1}`); dirty = true; renderProgram(); }; ac.append(b, ' '); });
-      const x = document.createElement('button'); x.className = 'danger'; x.textContent = '✕'; x.disabled = running; x.onclick = () => { P.tempProgram.splice(i, 1); hist(P, 'program', `deleted step ${i + 1} (${s.type})`); dirty = true; renderProgram(); refreshTabs(); }; ac.append(x);
+      const actions=row.insertCell();
+      for(const [label,delta] of [['↑',-1],['↓',1]]){const button=document.createElement('button');button.className='secondary';button.dataset.programMove=i;button.dataset.delta=delta;button.textContent=label;button.title=delta<0?'Move earlier':'Move later';button.disabled=checking||i+delta<0||i+delta>=P.tempProgram.length||(running&&(i<=activeStepIndex()||i+delta<=activeStepIndex()));button.onclick=()=>{if(checking||(running&&(i<=activeStepIndex()||i+delta<=activeStepIndex())))return;[P.tempProgram[i],P.tempProgram[i+delta]]=[P.tempProgram[i+delta],P.tempProgram[i]];programEdited(`Moved step ${i+1}`);renderProgram();};actions.append(button,' ');}
+      const remove=document.createElement('button');remove.className='secondary';remove.dataset.programDelete=i;remove.textContent='Remove';remove.disabled=checking||(running&&i<=activeStepIndex());remove.onclick=()=>{if(checking||(running&&i<=activeStepIndex()))return;P.tempProgram.splice(i,1);programEdited(`Removed step ${i+1}`);renderProgram();refreshTabs();};actions.append(remove);
     });
-    if (isTempControl) {
-      drawProgramPreview();
-    }
-    const errs = progErrors(), warn = HH.programWarnings(P.tempProgram);
-    const est = isTempControl ? HH.estimateDuration(P.tempProgram, 295) : 0;
-    const meas = P.tempProgram.filter(s => s.type === 'measure').length, per = Math.round(HH.acqSeconds(P.method));
-    const durMsg = isTempControl
-      ? `Estimated duration ≈ ${fmtDur(est + meas * per)} (thermal ${fmtDur(est)} + ${meas} measurements × ${per} s), assuming start at 295 K.`
-      : `Estimated duration ≈ ${fmtDur(meas * per)} (${meas} measurement${meas === 1 ? '' : 's'} × ${per} s at ambient temperature).`;
-    $('prog-msg').innerHTML = (P.tempProgram.length ? '' : '<div class="muted">No steps yet. Add a measurement step.</div>') +
-      errs.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + warn.map(x => `<div class="notice">${esc(x)}</div>`).join('') +
-      (P.tempProgram.length && !errs.length ? `<div class="notice ok">Valid. ${durMsg}</div>` : '');
+    $('clear-prog').textContent=running?'Remove future steps':'Clear program';
+    renderProgramSummary();
   }
+  function renderProgramSummary() {
+    const errors=progErrors(),warnings=HH.programWarnings(P.tempProgram);
+    const count=P.tempProgram.filter(s=>s.type==='measure').reduce((n,s)=>n+(s.repeats??1),0),scans=P.tempProgram.filter(s=>s.type==='scan').length;
+    const seconds=HH.estimateDuration(P.tempProgram,295)+count*HH.acqSeconds(P.method);
+    $('prog-msg').innerHTML=errors.map(e=>`<div class="notice err">${esc(e)}</div>`).join('')+warnings.map(e=>`<div class="notice">${esc(e)}</div>`).join('')+(!errors.length?`<div class="notice ok">${count} measurements at fixed temperatures${scans?`; ${scans} continuous temperature scan${scans===1?'':'s'}`:''}. Estimated duration ${fmtDur(seconds)}${scans?' plus acquisition completion at scan endpoints':''}.</div>`:'');
+    if(P.hardware.temperature==='control')drawProgramPreview();
+  }
+  $('sw-mode').onchange=renderProgram;
   $('apply-parameters').onclick=async()=>{
     if(HH.modeErrors(P).length||progErrors().length||parameterBusy)return;
     parameterBusy=true;setBadges();
-    try {
-      if(running&&P.hardware.backend==='real') {
-        if(!realJobId)throw Error('Wait for the program to start.');
-        await window.HHHardware.updateProgram(realJobId,P);
-      }
-      appliedMethod=JSON.parse(JSON.stringify(P.method));
-      if(running&&P.hardware.backend==='simulation') runner.steps=JSON.parse(JSON.stringify(P.tempProgram));
-      $('parameter-status').textContent=running?'Accepted for the next measurement. Current data keep their original settings.':'Parameters ready.';
-      hist(P,'config','Experiment parameters applied');
-    }catch(e){$('parameter-status').textContent='Not applied: '+e.message;}
+    try{
+      if(running&&P.hardware.backend==='real'){if(!realJobId)throw Error('Wait for the program to start.');await window.HHHardware.updateProgram(realJobId,P);}
+      if(running&&P.hardware.backend==='simulation')runner.updateProgram(P.tempProgram);
+      appliedMethod=JSON.parse(JSON.stringify(P.method));appliedProgram=JSON.parse(JSON.stringify(P.tempProgram));
+      $('parameter-status').textContent=running?'Accepted. Conditions and scan targets apply between acquisitions; stabilization targets update at the next temperature check.':'Conditions and program ready.';
+      hist(P,'config','Applied acquisition conditions and temperature program');
+    }catch(error){$('parameter-status').textContent='Not applied: '+error.message;}
     finally{parameterBusy=false;setBadges();}
   };
-  function fmtDur(s) { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`; }
-  $('add-step').onclick = () => { const ty = $('add-type').value; P.tempProgram.push(HH.makeStep(ty)); hist(P, 'program', 'added step ' + ty); dirty = true; renderProgram(); refreshTabs(); };
-  function drawProgramPreview() {
-    const canvas = $('c-prog-preview');
-    if (!canvas) return;
-    let T = 295, t_sec = 0;
-    const pts_t = [0], pts_T = [T];
-    P.tempProgram.forEach(s => {
-      if (s.type === 'goto') {
-        const rampDur = Math.abs(s.T - T) / (s.rate || 5) * 60;
-        t_sec += rampDur;
-        pts_t.push(t_sec / 60);
-        pts_T.push(s.T);
-        const stab = s.min_stab_s !== undefined ? s.min_stab_s : (s.window_s || 60);
-        t_sec += stab;
-        pts_t.push(t_sec / 60);
-        pts_T.push(s.T);
-        T = s.T;
-      } else if (s.type === 'soak') {
-        t_sec += (s.seconds || 60);
-        pts_t.push(t_sec / 60);
-        pts_T.push(T);
-      }
-    });
-    HH.plot(canvas, [{ x: pts_t, y: pts_T, color: '#66d6ce' }], { xlabel: 'Estimated time (min)', ylabel: 'T (K)' });
-    const statsEl = $('prog-preview-stats');
-    if (statsEl) {
-      statsEl.textContent = `Total thermal steps: ${P.tempProgram.filter(s => s.type === 'goto').length} | Est. thermal duration: ≈ ${fmtDur(t_sec)}`;
+  function fmtDur(seconds){if(!Number.isFinite(seconds))return 'unavailable';const hours=Math.floor(seconds/3600),minutes=Math.floor(seconds%3600/60);return hours?`${hours} h ${minutes} min`:`${minutes} min ${Math.round(seconds%60)} s`;}
+  $('add-step').onclick=()=>{if(!canMeasure()||checking)return;const type=$('add-type').value;P.tempProgram.push(HH.makeStep(type));programEdited('Added '+type);renderProgram();refreshTabs();};
+  function drawProgramPreview(){
+    let T=295,time=0;const x=[0],y=[T];
+    for(const step of P.tempProgram){
+      if(['goto','scan'].includes(step.type)){time+=Math.abs(step.T-T)/(step.rate||1)*60;T=step.T;x.push(time/60);y.push(T);if(step.type==='goto')time+=step.min_stab_s??step.window_s??60;}
+      else if(step.type==='measure')time+=(step.repeats??1)*HH.acqSeconds(P.method)+Math.max(0,(step.repeats??1)-1)*(step.interval_s??0);
+      else if(step.type==='soak')time+=step.seconds;
+      x.push(time/60);y.push(T);
     }
+    HH.plot($('c-prog-preview'),[{x,y,color:'#205f8e'}],{xlabel:'Estimated elapsed time (min)',ylabel:'Temperature (K)'});
+    $('prog-preview-stats').textContent='Estimated profile from 295 K; scan acquisitions may finish beyond the target crossing.';
   }
-
-  $('add-sweep').onclick = () => {
-    if (running) return;
-    try {
-      const steps = HH.sweep(+$('sw0').value, +$('sw1').value, +$('swd').value, {
-        rate: +$('swr').value,
-        min_stab_s: +$('sw-minstab').value,
-        max_stab_s: +$('sw-maxstab').value,
-        avg_s: +$('sw-window').value,
-        tol: +$('sw-tol').value,
-        mean_tol: +$('sw-mean').value,
-        esd_tol: +$('sw-esd').value,
-        window_s: +$('sw-window').value,
-        timeout_s: +$('sw-maxstab').value,
-        range: $('sw-range').value,
-      });
-      const errors = HH.validateProgram(steps, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
-      if (errors.length) throw new Error(errors[0]);
-      P.tempProgram.push(...steps);
-      hist(P, 'program', `Appended ${steps.length / 2} temperature points`, { steps }); dirty = true;
-      $('sweep-msg').textContent = `Added ${steps.length / 2} temperature points (ramps + measurement).`;
-    } catch (e) { Logger.error('UI', e.message); $('sweep-msg').textContent = e.message; }
-    renderProgram(); refreshTabs();
+  $('add-sweep').onclick=()=>{
+    if(!canMeasure()||checking)return;
+    try{
+      const start=+$('sw0').value,end=+$('sw1').value,options={rate:+$('swr').value,min_stab_s:+$('sw-minstab').value,max_stab_s:+$('sw-maxstab').value,avg_s:+$('sw-window').value,tol:+$('sw-tol').value,mean_tol:+$('sw-mean').value,esd_tol:+$('sw-esd').value,window_s:+$('sw-window').value,timeout_s:+$('sw-maxstab').value,range:$('sw-range').value,repeats:+$('sw-count').value,interval_s:+$('sw-interval').value};
+      const scanning=$('sw-mode').value==='scan';
+      if(scanning&&(!supportsTemperatureScan()||start===end))throw Error('Use a continuous acquisition method and different start/end temperatures.');
+      const steps=scanning?[HH.makeStep('goto',{...options,T:start}),HH.makeStep('scan',{T:end,rate:options.rate,range:options.range,interval_s:options.interval_s,endpoint_tol:options.tol,timeout_s:Math.max(86400,Math.ceil(Math.abs(end-start)/options.rate*120+HH.acqSeconds(P.method)*2))})]:HH.sweep(start,end,+$('swd').value,options);
+      const errors=HH.validateProgram(steps,thermalLimits());if(errors.length)throw Error(errors[0]);
+      P.tempProgram.push(...steps);programEdited(`Appended ${scanning?'slow scan':steps.length/2+' temperature points'}`);$('sweep-msg').textContent=scanning?'Added stabilization and a continuous temperature scan.':`Added ${steps.length/2} temperatures × ${options.repeats} measurements.`;
+    }catch(error){$('sweep-msg').textContent=error.message;}
+    renderProgram();refreshTabs();
   };
-  $('clear-prog').onclick = () => { if (P.tempProgram.length && confirm('Delete all program steps?')) { P.tempProgram = []; hist(P, 'program', 'cleared'); renderProgram(); refreshTabs(); } };
-
+  $('clear-prog').onclick=()=>{const from=running?activeStepIndex()+1:0;if(P.tempProgram.length>from&&confirm(running?'Remove all future steps?':'Clear the program?')){P.tempProgram.splice(from);programEdited('Removed remaining program steps');renderProgram();refreshTabs();}};
   /* ---------------- run ---------------- */
   function renderRun() {
     const n = $('run-notice'), why = [];
@@ -630,16 +522,16 @@
     if (!connectionsOk()) why.push('Check all selected device connections before running.');
     if (P.hardware.backend === 'real') why.push(...realRunErrors());
     if (P.hardware.backend === 'simulation' && P.hardware.temperature !== 'off' && !ctrl) why.push('Temperature device not connected.');
-    methodErrors().forEach(x => why.push(x)); progErrors().forEach(x => why.push(x));
+    if(!running){methodErrors().forEach(x => why.push(x)); progErrors().forEach(x => why.push(x));}
     n.innerHTML = why.map(x => `<div class="notice err">${esc(x)}</div>`).join('') + (P.hardware.backend === 'simulation' ? '<div class="notice">Simulation: synthetic data, tagged in saved projects.</div>' : '<div class="notice">Real program: Start enables the configured current source and moves the referenced OWIS axis. Abort stops motion, disables current and turns off temperature control. Timing and electrical phase require bench calibration.</div>');
     $('r-start').disabled = running || why.length > 0;
-    $('r-pause').disabled = !running || runner?.state==='pausing' || (paused() && (!connectionsOk() || HH.modeErrors(P).length>0)); $('r-abort').disabled = !running;
+    $('r-pause').disabled = !running || runner?.state==='pausing' || (paused() && (!connectionsOk() || HH.modeErrors(P).length>0 || progErrors().length>0)); $('r-abort').disabled = !running;
     $('r-pause').textContent = runner?.state === 'paused' ? 'Resume' : 'Pause';
     const t = $('run-steps'); t.innerHTML = '<tr><th>#</th><th>Step</th><th>Detail</th><th>State</th></tr>';
-    P.tempProgram.forEach((s, i) => { const tr = t.insertRow(); tr.className = stepState[i] === 'start' ? 'cur' : stepState[i] === 'done' ? 'donest' : ''; tr.insertCell().textContent = i + 1; tr.insertCell().textContent = s.type; tr.insertCell().textContent = s.type === 'goto' ? `${s.T} K @ ${s.rate} K/min` : s.type === 'soak' ? s.seconds + ' s' : s.label || ''; tr.insertCell().textContent = stepState[i] === 'start' ? 'active' : stepState[i] === 'done' ? 'done' : ''; });
+    (running&&appliedProgram?appliedProgram:P.tempProgram).forEach((s, i) => { const tr = t.insertRow(); tr.className = stepState[i] === 'start' ? 'cur' : stepState[i] === 'done' ? 'donest' : ''; tr.insertCell().textContent = i + 1; tr.insertCell().textContent = HH.STEP_TYPES[s.type]?.label||s.type; tr.insertCell().textContent = ['goto','scan'].includes(s.type) ? `${s.T} K @ ${s.rate} K/min` : s.type === 'soak' ? s.seconds + ' s' : `${s.repeats??1} measurements · ${s.interval_s??0} s wait`; tr.insertCell().textContent = stepState[i] === 'start' ? `Active${runner?.measurement?' · measurement '+runner.measurement:''}` : stepState[i] === 'done' ? 'Completed' : 'Pending'; });
     drawTemp(); setBadges();
   }
-  function drawTemp() { if (current === 'run') HH.plot($('c-temp'), [{ x: trace.t, y: trace.sp, color: '#e3b96e' }, { x: trace.t, y: trace.T, color: '#66d6ce' }], { xlabel: P.hardware.backend==='simulation'?'Virtual time (s)':'Elapsed time (s)', ylabel: 'T (K)' }); }
+  function drawTemp() { if (current === 'run') HH.plot($('c-temp'), [{ x: trace.t, y: trace.sp, color: '#ad7521' }, { x: trace.t, y: trace.T, color: '#205f8e' }], { xlabel: P.hardware.backend==='simulation'?'Virtual time (s)':'Elapsed time (s)', ylabel: 'T (K)' }); }
   function updateKpis(s) {
     $('r-kpis').innerHTML = [['Temperature', fx(s.T, 4) + ' K'], ['Setpoint', fx(s.setpoint, 4) + ' K'], ['Heater', fx(s.heater, 3) + ' %'], ['Runs saved', P.runs.length], ['Elapsed', fmtDur(vnow)]].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('');
   }
@@ -657,7 +549,7 @@
     if (!canMeasure() || !connectionsOk() || realRunErrors().length) {renderRun();return;}
     let jobId=null,cursor=0,abortRequested=false;
     running=true; stepState=[];vnow=0;trace={t:[],T:[],sp:[]};const realStarted=Date.now();
-    appliedMethod=JSON.parse(JSON.stringify(P.method));configurationReleased=false;
+    appliedMethod=JSON.parse(JSON.stringify(P.method));appliedProgram=JSON.parse(JSON.stringify(P.tempProgram));configurationReleased=false;
     runner={state:'running',abort:()=>{abortRequested=true;if(jobId) window.HHHardware.abortProgram(jobId).catch(e=>Logger.error('HW',e.message));},pause:async()=>{runner.state='pausing';renderRun();await window.HHHardware.pauseProgram(jobId);},resume:async()=>{await window.HHHardware.resumeProgram(jobId,P);runner.state='running';configurationReleased=false;}};
     renderRun();
     try {
@@ -668,6 +560,7 @@
       while (true) {
         const status=await window.HHHardware.programStatus(jobId,cursor);
         runner.state=status.state;
+        runner.index=status.step;runner.measurement=status.measurement;
         if(status.state==='paused')configurationReleased=true;
         for (const data of status.runs) {
           const run=Object.assign({id:nextRunId(),started:new Date().toISOString(),sample:JSON.parse(JSON.stringify(P.sample)),method:JSON.parse(JSON.stringify(P.method)),excluded:[]},data);
@@ -675,8 +568,8 @@
           P.runs.push(run);selRun=run.id;dirty=true;hist(P,'run',run.id+' recorded from real instruments');
         }
         cursor=status.count; P.simulated=P.runs.some(r=>r.simulated);
-        stepState=P.tempProgram.map((_,i)=>i<status.step?'done':i===status.step?'start':'');
-        $('r-prog').style.width=((status.step+(status.state==='finished'?1:0))/P.tempProgram.length*100)+'%';
+        stepState=(appliedProgram||P.tempProgram).map((_,i)=>i<status.step?'done':i===status.step?'start':'');
+        $('r-prog').style.width=((status.step+(status.state==='finished'?1:0))/(appliedProgram||P.tempProgram).length*100)+'%';
         vnow=(Date.now()-realStarted)/1000;
         if (Number.isFinite(status.temperatureK)) {trace.t.push(vnow);trace.T.push(status.temperatureK);trace.sp.push(status.setpointK??NaN);}
         updateActualTelemetry({
@@ -721,11 +614,11 @@
       pollSec: 2, now: () => vnow,
       sleep: async s => { simDev.advance(s); vnow += s; if (speed > 0) await sleepReal(s * 1000 / speed); else if (Math.round(vnow) % 20 === 0) await sleepReal(0); },
       onTemp: s => { if (s.stability) $('r-stability').textContent = `Temperature stability: |ΔT| ${fx(s.stability.error)} K; mean |ΔT| ${s.stability.meanError === null ? 'collecting window' : fx(s.stability.meanError) + ' K'}; in band ${fx(s.stability.stableFor)} s`; trace.t.push(s.t); trace.T.push(s.T); trace.sp.push(s.setpoint); updateKpis(s); drawTemp(); },
-      onStep: (i, s, st) => { stepState[i] = st; $('r-prog').style.width = ((st === 'done' ? i + 1 : i) / total * 100) + '%'; setStatus(`Step ${i + 1}/${total}: ${HH.STEP_TYPES[s.type].label}`); hist(P, 'run', `Step ${i + 1} ${st}: ${s.type}`); renderRun(); },
+      onStep: (i, s, st) => { stepState[i] = st; const count=(appliedProgram||P.tempProgram).length;$('r-prog').style.width = ((st === 'done' ? i + 1 : i) / count * 100) + '%'; setStatus(`Step ${i + 1}/${count}: ${HH.STEP_TYPES[s.type].label}`); hist(P, 'run', `Step ${i + 1} ${st}: ${s.type}`); renderRun(); },
       measure: ctx => measure(ctx, speed),
     };
-    runner = new HH.ProgramRunner(ctrl, JSON.parse(JSON.stringify(P.tempProgram)), env, { maxK: tl().maxK, maxRateKmin: tl().maxRateKmin });
-    appliedMethod=JSON.parse(JSON.stringify(P.method));configurationReleased=false;
+    runner = new HH.ProgramRunner(ctrl, JSON.parse(JSON.stringify(P.tempProgram)), env, thermalLimits());
+    appliedMethod=JSON.parse(JSON.stringify(P.method));appliedProgram=JSON.parse(JSON.stringify(P.tempProgram));configurationReleased=false;
     running = true; hist(P, 'run', `Program started (${total} steps, ${P.runs.length} existing runs)`); renderRun();
     try { await runner.run(); setStatus('Finished'); hist(P, 'run', 'Program finished'); }
     catch (e) { setStatus((e.aborted ? 'Aborted: ' : 'Error: ') + e.message); hist(P, 'run', (e.aborted ? 'Aborted: ' : 'ERROR: ') + e.message + ' — heater switched off'); }
@@ -736,12 +629,12 @@
     if(!runner)return;
     try {
       if(paused()) {
-        if(!connectionsOk()||HH.modeErrors(P).length)return;
+        if(!connectionsOk()||HH.modeErrors(P).length||progErrors().length)return;
         if(P.hardware.backend==='simulation'){
           if(P.hardware.temperature==='off'&&!ctrl){simDev={advance(){}};ctrl={readK:async()=>null,getSetpoint:async()=>null,heaterOff:async()=>{}};}
-          runner.c=ctrl;appliedMethod=JSON.parse(JSON.stringify(P.method));
+          runner.c=ctrl;runner.updateProgram(P.tempProgram);
         }
-        await runner.resume();configurationReleased=false;
+        await runner.resume();appliedMethod=JSON.parse(JSON.stringify(P.method));appliedProgram=JSON.parse(JSON.stringify(P.tempProgram));configurationReleased=false;
       } else {
         await runner.pause();
         if(P.hardware.backend==='simulation') {runner.state='paused';configurationReleased=true;}
@@ -756,22 +649,28 @@
     Logger.info('MEAS', `${id}: ${P.method.kind} mode at ${ctx.T_set} K`);
     const T = await ctrl.readK();
     const snapshot=configurationSnapshot();snapshot.method=JSON.parse(JSON.stringify(appliedMethod||P.method));
-    const res = await HH.acquire(snapshot, ctx, () => T === null ? 295 : T);
+    let localTime=0;
+    const res = await HH.acquire(snapshot, ctx, time => {const delta=time-localTime;if(delta>0){simDev.advance(delta);vnow+=delta;localTime=time;}return Number.isFinite(simDev.T)?simDev.T:T===null?295:T;});
     if (P.hardware.temperature === 'off') { res.T_mean = null; res.samples.T.fill(null); }
-    const dur = res.samples.t[res.samples.t.length - 1]; vnow += dur; simDev.advance(dur);
+    const dur = res.samples.t[res.samples.t.length - 1];
     if (speed > 0) await sleepReal(Math.min(dur * 1000 / speed, 5000));
-    const run = { id, label: ctx.step.label || '', positionSource: connectionCheck?.positionSource||'owis', T_set: ctx.T_set, T_mean: res.T_mean, started: new Date().toISOString(), simulated: true, rsq_ohm: res.rsq_ohm, sample:snapshot.sample, method:snapshot.method, samples: res.samples, excluded: [] };
+    const run = { id, label: ctx.step.label || '', positionSource: connectionCheck?.positionSource||'owis', T_set: ctx.T_set, T_mean: res.T_mean,temperatureMode:ctx.temperatureMode,temperatureStats:res.temperatureStats,programStep:JSON.parse(JSON.stringify(ctx.step)),measurement:ctx.measurement, started: new Date().toISOString(), simulated: true, rsq_ohm: res.rsq_ohm, sample:snapshot.sample, method:snapshot.method, samples: res.samples, excluded: [] };
     fitRun(run); P.runs.push(run); P.simulated=P.runs.some(r=>r.simulated); dirty=true;
     hist(P, 'run', `${id} saved: T=${fx(run.T_mean)} K, n_s=${fx(run.derived?.ns)} m⁻²`, { run: id });
     Logger.info('MEAS', `${id} done: A1=${fx(run.fit?.A1)} Ω`);
     selRun = id; if (current === 'inspect' && $('i-live').checked) renderInspect();
+    if(P.hardware.temperature!=='off'){trace.t.push(vnow);trace.T.push(simDev.T??T);trace.sp.push(ctx.T_set);updateActualTelemetry({T:simDev.T??T,sp:ctx.T_set,elapsedS:vnow});drawTemp();}
+    setStatus(`Step ${ctx.stepIndex+1}: measurement ${ctx.measurement??1} recorded${ctx.temperatureMode==='scan'?' during temperature scan':''}`);
+    renderRun();await sleepReal(0);
   }
   function fitRun(run) {
     try {
+      if(run.samples.T.some(Number.isFinite)){run.temperatureStats=HH.temperatureStats(run.samples.t,run.samples.T,run.samples.valid);run.T_mean=run.temperatureStats.mean;}
       if (run.incomplete) throw new Error('Incomplete acquisition: retained raw samples without fitting.');
       run.fit = run.detectionKind === 'field-lockin' ? HH.fitFieldLockin(run.samples,run.method.rotating.excitation) : run.method?.kind === 'rotating' && run.method.rotating.excitation === 'dc' ? HH.fitCurrentSweep(run.samples) : HH.fitHarmonics(run.samples);
       run.derived = HH.derive(run.fit, analysisSample(run));
       if (run.fit.warnings) run.derived.warnings.push(...run.fit.warnings);
+      if(run.temperatureMode==='scan')run.derived.warnings.push(`Acquired during a temperature scan (${fx(run.temperatureStats?.min)}–${fx(run.temperatureStats?.max)} K). The fit represents this temperature interval; a single-temperature material model may not describe a rapidly evolving sample.`);
       run.fitError = null;
     } catch (e) { run.fit = null; run.derived = null; run.fitError = e.message; Logger.error('FIT', run.id + ': ' + e.message); }
   }
@@ -794,19 +693,19 @@
     $('i-slope-card').hidden = !f?.currentSlope;
     if (f?.currentSlope) {
       const slope = f.currentSlope, x = slope.points.map(p => p.I), y = slope.points.map(p => p.voltage);
-      HH.plot($('c-current-slope'), [{x, y, color:'#66d6ce', kind:'points'}, {x, y:x.map(I=>slope.intercept+slope.slope*I), color:'#e3b96e'}], {xlabel: r.method.rotating.excitation === 'dc' ? 'DC current (A)' : 'RMS current (A)', ylabel:'Signed Hall voltage (V)'});
+      HH.plot($('c-current-slope'), [{x, y, color:'#205f8e', kind:'points'}, {x, y:x.map(I=>slope.intercept+slope.slope*I), color:'#ad7521'}], {xlabel: r.method.rotating.excitation === 'dc' ? 'DC current (A)' : 'RMS current (A)', ylabel:'Signed Hall voltage (V)'});
       $('i-slope-info').textContent = `Slope ${fx(slope.slope)} V/A; ${slope.points.length === 1 ? 'assumed zero offset' : 'fitted intercept'} ${fx(slope.intercept)} V. ${slope.points.length} distinct currents.`;
       if (r.detectionKind==='field-lockin') $('i-slope-info').textContent += ' RMS lock-in output normalized to Hall amplitude; verify reference phase and gain.';
     }
-    $('i-kpis').innerHTML = [['T mean', fx(r.T_mean, 5) + ' K'], ['Samples (valid)', `${s.t.length} (${s.valid.reduce((a, b) => a + b, 0)})`], ['A1', f ? fx(f.A1) + ' Ω' : '—'], ['D1/A1', f ? fx(f.D1 / f.A1, 3) : '—'], ['A2', f ? fx(f.A2) + ' Ω' : '—'], ['Fit rms', f ? fx(f.rms) + ' V' : '—'], ['Condition', f ? fx(f.cond, 3) : '—'], ['Carrier', d?.carrier || '—']].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('') + (r.fitError ? `<div class="notice err">${esc(r.fitError)}</div>` : '') + (d ? d.warnings.map(w => `<div class="notice">${esc(w)}</div>`).join('') : '') + (r.simulated ? '<div class="notice">Simulated data.</div>' : '');
+    $('i-kpis').innerHTML = [['T mean', fx(r.T_mean, 5) + ' K'], ['T range', fx(r.temperatureStats?.min) + '–' + fx(r.temperatureStats?.max) + ' K'], ['Samples (valid)', `${s.t.length} (${s.valid.reduce((a, b) => a + b, 0)})`], ['A1', f ? fx(f.A1) + ' Ω' : '—'], ['D1/A1', f ? fx(f.D1 / f.A1, 3) : '—'], ['A2', f ? fx(f.A2) + ' Ω' : '—'], ['Fit rms', f ? fx(f.rms) + ' V' : '—'], ['Condition', f ? fx(f.cond, 3) : '—'], ['Carrier', d?.carrier || '—']].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('') + (r.fitError ? `<div class="notice err">${esc(r.fitError)}</div>` : '') + (d ? d.warnings.map(w => `<div class="notice">${esc(w)}</div>`).join('') : '') + (r.simulated ? '<div class="notice">Simulated data.</div>' : '');
     // choose one current level for X vs angle readability: all valid points, X/I normalised to ohm
     const vi = [], mi = []; s.theta.forEach((th, i) => { if (Number.isFinite(th) && Number.isFinite(s.I[i]) && Number.isFinite(s.X[i]) && s.I[i] !== 0) (s.valid[i] ? vi : mi).push(i); });
     const wrap = th => { const w = ((th % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI); return w * 180 / Math.PI; };
     const R = i => s.X[i] / s.I[i];
     const model = i => f ? HH.predictVoltage(f, s.theta[i], s.I[i]) / s.I[i] : null;
-    HH.plot($('c-xth'), [{ x: mi.map(i => wrap(s.theta[i])), y: mi.map(R), color: '#566677', kind: 'points' }, { x: vi.map(i => wrap(s.theta[i])), y: vi.map(R), color: '#66d6ce', kind: 'points' }, { x: vi.map(i => wrap(s.theta[i])), y: vi.map(model), color: '#e3b96e', kind: 'points' }], { xlabel: 'field angle (deg)', ylabel: 'X / I (Ω)' });
-    HH.plot($('c-xt'), [{ x: s.t, y: s.X, color: '#66d6ce' }, { x: s.t, y: s.Y, color: '#80aaf9' }], { xlabel: 't (s)', ylabel: 'lock-in (V)' });
-    HH.plot($('c-res'), f ? [{ x: vi.map(i => wrap(s.theta[i])), y: vi.map(i => R(i) - model(i)), color: '#80aaf9', kind: 'points' }] : [], { xlabel: 'field angle (deg)', ylabel: 'residual (Ω)' });
+    HH.plot($('c-xth'), [{ x: mi.map(i => wrap(s.theta[i])), y: mi.map(R), color: '#9ba7b1', kind: 'points' }, { x: vi.map(i => wrap(s.theta[i])), y: vi.map(R), color: '#205f8e', kind: 'points' }, { x: vi.map(i => wrap(s.theta[i])), y: vi.map(model), color: '#ad7521', kind: 'points' }], { xlabel: 'field angle (deg)', ylabel: 'X / I (Ω)' });
+    HH.plot($('c-xt'), [{ x: s.t, y: s.X, color: '#205f8e' }, { x: s.t, y: s.Y, color: '#6a8091' }], { xlabel: 't (s)', ylabel: 'lock-in (V)' });
+    HH.plot($('c-res'), f ? [{ x: vi.map(i => wrap(s.theta[i])), y: vi.map(i => R(i) - model(i)), color: '#6a8091', kind: 'points' }] : [], { xlabel: 'field angle (deg)', ylabel: 'residual (Ω)' });
     const t = $('i-table'); t.innerHTML = '<tr><th>t (s)</th><th>θ (deg)</th><th>X (V)</th><th>Y (V)</th><th>I (A)</th><th>T (K)</th><th>valid</th></tr>';
     const stride = Math.max(1, Math.ceil(s.t.length / 300));
     $('i-table-info').textContent = stride > 1 ? `Showing every ${stride}th sample of ${s.t.length}. Raw CSV contains every sample.` : `${s.t.length} raw samples.`;
@@ -829,7 +728,7 @@
   const scaled = (v, factor) => Number.isFinite(v) ? v * factor : null;
   const COLS = [
     ['id','Run',r=>r.id], ['status','Status',r=>r.fitError || (Number.isFinite(r.derived?.RH) ? 'Analyzed' : 'Fit only')],
-    ['source','Data',r=>r.simulated ? 'Simulated' : 'Measured'], ['T','T (K)',r=>r.T_mean],
+    ['source','Data',r=>r.simulated ? 'Simulated' : 'Measured'], ['T','Mean T (K)',r=>r.T_mean], ['Tmin','Min T (K)',r=>r.temperatureStats?.min], ['Tmax','Max T (K)',r=>r.temperatureStats?.max], ['thermalMode','Temperature mode',r=>r.temperatureMode||'step'], ['measurement','Measurement',r=>r.measurement],
     ['ns','n_s (cm⁻²)',r=>scaled(r.derived?.ns,1e-4)], ['ns_e','σ n_s (cm⁻²)',r=>scaled(r.derived?.ns_err,1e-4)],
     ['n','n (cm⁻³)',r=>scaled(r.derived?.n,1e-6)], ['rh','R_H (cm³/C)',r=>scaled(r.derived?.RH,1e6)],
     ['rh_e','σ R_H (cm³/C)',r=>scaled(r.derived?.RH_err,1e6)], ['mu','μ (cm²/Vs)',r=>scaled(r.derived?.mu,1e4)],
@@ -847,7 +746,7 @@
   function propertySeries(runs, property, factor, axis) {
     return [false,true].flatMap(simulated => {
       const points = runs.filter(r=>!!r.simulated === simulated && Number.isFinite(axis.x(r)) && Number.isFinite(property(r))).sort((a,b)=>axis.x(a)-axis.x(b));
-      const x=points.map(axis.x), y=points.map(r=>property(r)*factor), color=simulated?'#e3b96e':'#66d6ce';
+      const x=points.map(axis.x), y=points.map(r=>property(r)*factor), color=simulated?'#ad7521':'#205f8e';
       return [{x,y,color,kind:'points'}, ...(axis.temperature ? [{x,y,color}] : [])];
     });
   }
@@ -1138,11 +1037,11 @@
           const rawAngle = (mr.counter * 360.) / (P.hardware.magnet.counts_per_turn || 50000);
           const dir = P.hardware.magnet.dir_sign || 1;
           const newOffset = -rawAngle * dir;
-          P.hardware.magnet.angle_offset_deg = +newOffset.toFixed(4);
+          P.hardware.magnet.angle_offset_deg = newOffset;
           dirty=true;connectionCheck=null;
           syncForm();
-          if (statusEl) statusEl.textContent = `Zero set: counter ${mr.counter} mapped to 0.0° (offset: ${P.hardware.magnet.angle_offset_deg}°).`;
-          hist(P, 'config', `Set angle 0° at counter ${mr.counter}`);
+          if (statusEl) statusEl.textContent = `+B reference set at stage ${fx(rawAngle)}° (counter ${mr.counter}); field angle is now 0°.`;
+          hist(P, 'config', `Set +B reference at counter ${mr.counter}`);
           actualTelemetry.angleDeg = 0.0;
           actualTelemetry.counter = mr.counter;
           renderActualPanel();
@@ -1153,7 +1052,7 @@
       P.hardware.magnet.angle_offset_deg = 0;
       dirty=true;connectionCheck=null;
       actualTelemetry.angleDeg = 0.0;
-      if (statusEl) statusEl.textContent = 'Zero offset set to 0.0°.';
+      if (statusEl) statusEl.textContent = 'Simulated +B reference set at stage 0°.';
       syncForm();
       renderActualPanel();
     } catch (e) {
@@ -1197,14 +1096,12 @@
     const result = await window.HHHardware.connect();
     hardwareAuthenticated = result.ok; accessChecking = false;
     connectionCheck = null; ctrl = null; simDev = null;
-    $('access-status').textContent = result.ok ? 'Connected automatically · no token required' : result.error;
-    $('rust-settings-status').textContent = result.ok ? 'Local session connected automatically.' : result.error;
+    $('access-status').textContent = result.ok ? 'Local service connected' : result.error;
     setBadges(); refreshTabs();
     if (result.ok && !P.runs.length && ['analysis','project'].includes(current)) show('mode');
     else if (!result.ok && !reachable(current)) show(P.runs.length ? 'analysis' : 'project');
   }
   $('workstation-reconnect').onclick = connectWorkstation;
-  $('rust-reconnect').onclick = connectWorkstation;
   $('open-project').onclick = () => $('pr-load').click();
   /* ---------------- Global Drag & Drop for Projects ---------------- */
   window.addEventListener('dragover', e => { e.preventDefault(); });
@@ -1229,6 +1126,7 @@
   window.addEventListener('beforeunload', e => { if (dirty || running) { e.preventDefault(); e.returnValue = ''; } });
   window.addEventListener('error', e => Logger.error('JS', e.message));
   window.addEventListener('unhandledrejection', e => Logger.error('JS', 'Unhandled: ' + (e.reason && e.reason.message || e.reason)));
+  window.addEventListener('hh:themechange',()=>renderPage(current));
   buildTabs(); syncForm(); setBadges(); connectWorkstation(); Logger.info('APP', 'Workstation started; select real instruments or explicit simulation'); hist(P, 'project', 'new project');
   show('project');
   window.HH.debugState = () => ({ P, ctrl, running, connectionsOk, runner, accessChecking, accessMode:canMeasure()?'workstation':'analysis' });

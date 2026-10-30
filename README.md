@@ -12,6 +12,10 @@ Only the computer running the Rust service can control its instruments. The serv
 
 Open the static app from GitHub Pages, a local web server, or `app/index.html`. Without a connected local workstation it opens in analysis mode. Use **Open project**, or drop a `.hallproj.json` file, to inspect existing measurements. Method setup, instrument checks, simulation execution and acquisition are unavailable in this mode. Project settings cannot unlock acquisition.
 
+## Temperature and acquisition programs
+
+Use stabilized temperature steps with a measurement count at each point, or slow heating/cooling scans that acquire during temperature evolution. Supported single-current modes keep excitation and rotation active between saved windows. Every run records its measured temperature mean/range and acquisition conditions. Edit active parameters and the future sequence during a run, then apply them at acquisition boundaries.
+
 ## Analyze measurements
 
 - Inspect raw voltages, angular fits, current slopes, residuals and excluded samples.
@@ -34,6 +38,7 @@ node app/test/modes.js
 node app/test/connections.js
 node app/test/analysis.js
 node app/test/backend.js
+node app/test/temperature.js
 ```
 
 For installed-Chrome browser tests, build the debug Rust binary, then run `node app/test/browser.js`. The suite starts an isolated service on port 18865 and stops it afterward. Override `HALBACH_TEST_URL` to use an already-running test service, or `CHROME_BIN` to choose a browser. The browser suite uses simulated data and fake acquisition responses, without accessing physical instruments.

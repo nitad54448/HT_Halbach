@@ -14,8 +14,11 @@
     const dpr = (root.devicePixelRatio || 1), W = canvas.clientWidth || (o.print ? canvas.width : 640), H = canvas.clientHeight || (o.print ? canvas.height : 280);
     canvas.width = W * dpr; canvas.height = H * dpr;
     const g = canvas.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const txt = o.print ? '#000' : '#91a3b5', grid = o.print ? '#ddd' : '#223140';
-    g.fillStyle = o.print ? '#fff' : '#0d1721'; g.fillRect(0, 0, W, H);
+    const css=getComputedStyle(root.document.documentElement);
+    const value=(key,fallback)=>css.getPropertyValue(key).trim()||fallback;
+    const txt=o.print?'#536574':value('--plot-text','#536574'),grid=o.print?'#e0e6ec':value('--plot-grid','#e0e6ec');
+    g.fillStyle=o.print?'#fff':value('--plot-bg','#fff');g.fillRect(0,0,W,H);
+    const colors={'#205f8e':'--plot-primary','#ad7521':'--plot-secondary','#6a8091':'--plot-tertiary','#9ba7b1':'--plot-muted'};
     const m = { l: 62, r: 14, t: 12, b: 38 };
     let xs = [Infinity, -Infinity], ys = [Infinity, -Infinity];
     for (const s of series) for (let i = 0; i < s.x.length; i++) {
@@ -34,7 +37,8 @@
     if (o.ylabel) { g.save(); g.translate(12, (m.t + H - m.b) / 2); g.rotate(-Math.PI / 2); g.fillText(o.ylabel, 0, 0); g.restore(); }
     g.save(); g.beginPath(); g.rect(m.l, m.t, W - m.l - m.r, H - m.t - m.b); g.clip();
     for (const s of series) {
-      g.strokeStyle = g.fillStyle = s.color || '#66d6ce';
+      const color=s.color||'#205f8e';
+      g.strokeStyle=g.fillStyle=!o.print&&colors[color]?value(colors[color],color):color;
       const n = s.x.length, stride = Math.max(1, Math.ceil(n / 4000));
       if (s.kind === 'points') { for (let i = 0; i < n; i += stride) { if (Number.isFinite(s.x[i]) && Number.isFinite(s.y[i])) g.fillRect(X(s.x[i]) - 1.5, Y(s.y[i]) - 1.5, 3, 3); } }
       else { g.lineWidth = 1.5; g.beginPath(); let pen = false; for (let i = 0; i < n; i += stride) { if (!Number.isFinite(s.x[i]) || !Number.isFinite(s.y[i])) { pen = false; continue; } pen ? g.lineTo(X(s.x[i]), Y(s.y[i])) : g.moveTo(X(s.x[i]), Y(s.y[i])); pen = true; } g.stroke(); }

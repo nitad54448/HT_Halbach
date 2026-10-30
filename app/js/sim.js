@@ -44,22 +44,24 @@
   async function acquire(project, ctx, getT, seed) {
     const m = JSON.parse(JSON.stringify(project.method)), S = project.sample, r = rng(seed || Math.floor(Math.random() * 1e9));
     if(modes.isDelta(project)) m.fixed.excitation='delta';
-    const T = getT(), film = toyFilm(T, S), fs = 20; // lock-in output sample rate (Hz)
+    const T = getT(0), film = toyFilm(T, S), fs = 20;
     const out = { t: [], theta: [], X: [], Y: [], I: [], T: [], valid: [], dir: [] };
     let t = 0; const sigma = 2e-7, contact = 3e-6, tau = Math.max(m.tc_ms / 1000, 0.05) / 3;
     for (const seg of schedule(m, fs)) {
       for (let k = 0; k < seg.n; k++, t += 1 / fs) {
         const tl = k / fs, th = seg.th(tl, t), settle = Math.exp(-tl / tau), I = seg.I * (seg.delta && k % 2 ? -1 : 1);
-        const hall = film.A1 * Math.cos(th) + film.A2 * Math.sin(2 * th);
-        const Xv = I * hall + I * contact + 1e-7 + settle * I * film.rsq * 0.05 + sigma * gauss(r); // transient removed by the mask
+        const temperature=getT(t),localFilm=temperature===T?film:toyFilm(temperature,S);
+        const hall = localFilm.A1 * Math.cos(th) + localFilm.A2 * Math.sin(2 * th);
+        const Xv = I * hall + I * contact + 1e-7 + settle * I * localFilm.rsq * 0.05 + sigma * gauss(r);
         out.t.push(t); out.theta.push(th); out.X.push(Xv); out.Y.push(sigma * 0.3 * gauss(r)); out.I.push(I);
-        out.T.push(T + 0.003 * gauss(r)); out.valid.push(tl >= seg.mask ? 1 : 0); out.dir.push(seg.dir);
+        out.T.push(temperature + 0.003 * gauss(r)); out.valid.push(tl >= seg.mask ? 1 : 0); out.dir.push(seg.dir);
       }
       if (ctx.checkpoint) await ctx.checkpoint();
       Logger.debug('SIM', `segment ${(seg.I * 1e3).toFixed(3)} mA, ${seg.n} samples`);
     }
     const rsq_ohm = film.rsq * (1 + 0.002 * gauss(r));
-    return { simulated: true, rsq_ohm, T_mean: out.T.reduce((a, b) => a + b, 0) / out.T.length, samples: out, truth: { ns: film.ns, mu: film.mu, rsq: film.rsq, A1: film.A1, A2: film.A2 } };
+    const stats=core.temperatureStats(out.t,out.T,out.valid);
+    return { simulated: true, rsq_ohm, T_mean:stats.mean,temperatureStats:stats,samples: out, truth: { ns: film.ns, mu: film.mu, rsq: film.rsq, A1: film.A1, A2: film.A2 } };
   }
 
   const api = { acquire, acquireChirp: acquire, schedule, toyFilm, rng, gauss };

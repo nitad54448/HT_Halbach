@@ -46,8 +46,12 @@ impl Service {
             shutdown: AtomicBool::new(false),
         })
     }
-    pub fn stop(&self) {
+    // Console handlers must not wait for a mutex held by a request thread.
+    pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+    }
+    pub fn stop(&self) {
+        self.request_shutdown();
         if let Some(j) = self.job.lock().unwrap().as_ref() {
             j.abort.store(true, Ordering::SeqCst);
         }
@@ -72,7 +76,12 @@ impl Service {
             .is_some_and(|j| !j.done.load(Ordering::SeqCst))
     }
     pub fn dispatch(&self, path: &str, data: Value) -> R<Value> {
+        if self.shutdown.load(Ordering::SeqCst) && !["/api/status", "/api/abort"].contains(&path) {
+            return Err("Workstation service is shutting down".into());
+        }
         match path {
+            // The HTTP handler sends the acknowledgement before requesting shutdown.
+            "/api/shutdown" => Ok(json!({"ok":true,"pid":std::process::id(),"message":"Stopping workstation service; active acquisition will be aborted and cleaned up."})),
             "/api/run" => {
                 let mut active = self.job.lock().map_err(|_| "Job lock poisoned")?;
                 if active
@@ -146,6 +155,7 @@ impl Service {
                 std::thread::spawn(move || service.handle(request));
             }
         }
+        eprintln!("Stopping workstation service; waiting for instrument cleanup...");
         self.stop();
         let deadline = Instant::now() + Duration::from_secs(20);
         while self.busy() && Instant::now() < deadline {
@@ -238,7 +248,10 @@ impl Service {
             self.dispatch(&path, data)
         })();
         match result {
-            Ok(data) => self.reply(request, 200, data, origin.as_deref()),
+            Ok(data) => {
+                self.reply(request, 200, data, origin.as_deref());
+                if path == "/api/shutdown" { self.stop(); }
+            }
             Err(e) => self.reply(request, 400, json!({"error":e}), origin.as_deref()),
         }
     }

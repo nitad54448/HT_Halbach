@@ -2,6 +2,14 @@ const assert = require('node:assert/strict');
 const A = require('../js/analysis.js');
 const {newProject, normalizeProject} = require('../js/core.js');
 
+for (const address of ['', '6220', 'GPIB0::9::INSTR']) {
+  const project = newProject();
+  Object.assign(project.hardware.source, {model:'K6220',address});
+  const normalized = normalizeProject(project);
+  assert.equal(normalized.hardware.source.address, address === 'GPIB0::9::INSTR' ? address : 'GPIB0::6::INSTR');
+  assert.equal(project.hardware.source.address, address, 'Address migration must not mutate the input file');
+}
+
 function angular(currents=[0.001,0.002], count=48) {
   const s={t:[],theta:[],X:[],Y:[],I:[],T:[],valid:[]};
   for (const I of currents) for(let j=0;j<count;j++) {

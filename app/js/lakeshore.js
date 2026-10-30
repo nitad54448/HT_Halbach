@@ -22,6 +22,7 @@
       if (!MODELS[model]) throw new Error('Unsupported model ' + model);
       this.model = model; this.spec = MODELS[model]; this.t = transport;
       this.input = (opts && opts.input) || 'A'; this.loop = (opts && opts.loop) || 1;
+      this.minRateKmin = opts?.minRateKmin ?? 0.1;
       if (!this.spec.inputs.includes(this.input)) throw new Error('Input ' + this.input + ' not on ' + this.spec.name);
       if (!this.spec.loops.includes(this.loop)) throw new Error('Loop ' + this.loop + ' not on ' + this.spec.name);
     }
@@ -52,8 +53,8 @@
       await this._w(`SETP ${this.loop},${K.toFixed(3)}`);
     }
     async setRamp(on, rateKmin) {
-      if (on && !(rateKmin >= 0.1 && rateKmin <= 100)) throw new Error('Ramp rate must be 0.1..100 K/min');
-      await this._w(`RAMP ${this.loop},${on ? 1 : 0},${on ? rateKmin.toFixed(2) : 0}`);
+      if (on && !(rateKmin >= this.minRateKmin && rateKmin <= 100)) throw new Error(`Ramp rate must be ${this.minRateKmin}..100 K/min`);
+      await this._w(`RAMP ${this.loop},${on ? 1 : 0},${on ? rateKmin.toFixed(3) : 0}`);
     }
     async isRamping() { return (await this._q('RAMPST? ' + this.loop)).trim() === '1'; }
     async setHeaterRange(name) {
@@ -90,7 +91,8 @@
       },
     },
     soak: { label: 'Soak / wait', defaults: { seconds: 60 } },
-    measure: { label: 'Run Hall measurement', defaults: { label: '' } },
+    measure: { label: 'Measure at temperature', defaults: { label: '', repeats: 1, interval_s: 0 } },
+    scan: { label: 'Measure during temperature scan', defaults: { T: 320, rate: 0.1, range: 'medium', endpoint_tol: 0.05, timeout_s: 86400, interval_s: 0, label: '' } },
     heater_off: { label: 'Heater off', defaults: {} },
   };
   function makeStep(type, over) {
@@ -111,20 +113,23 @@
     const out = [], dir = T1 >= T0 ? 1 : -1, n = Math.floor(Math.abs(T1 - T0) / dT + 1e-9);
     for (let k = 0; k <= n; k++) {
       const T = +(T0 + dir * k * dT).toFixed(4);
-      out.push(makeStep('goto', Object.assign({}, base, { T })), makeStep('measure', { label: T + ' K' }));
+      out.push(makeStep('goto', Object.assign({}, base, { T })), makeStep('measure', { label: T + ' K', repeats: base?.repeats ?? 1, interval_s: base?.interval_s ?? 0 }));
     }
     return out;
   }
   function validateProgram(steps, limits) {
-    const L = Object.assign({ maxK: 400, minK: 1.4, maxRateKmin: 10 }, limits), errs = [];
+    const L = Object.assign({ maxK: 400, minK: 1.4, maxRateKmin: 10, minRateKmin: 0.1 }, limits), errs = [];
     if (!steps.length) errs.push('Program is empty');
+    if(steps.length>10000)errs.push('Program is limited to 10000 operations');
     steps.forEach((s, i) => {
       const w = 'Step ' + (i + 1) + ' (' + s.type + '): ';
       if (!STEP_TYPES[s.type]) return errs.push(w + 'unknown type');
-      if (s.type === 'goto') {
+      if (s.type === 'goto' || s.type === 'scan') {
         if (!(s.T >= L.minK && s.T <= L.maxK)) errs.push(w + `T must be ${L.minK}..${L.maxK} K`);
-        if (!(s.rate > 0 && s.rate <= L.maxRateKmin)) errs.push(w + `rate must be >0 and ≤ ${L.maxRateKmin} K/min`);
+        if (!(Number.isFinite(s.rate) && s.rate >= L.minRateKmin && s.rate <= L.maxRateKmin)) errs.push(w + `rate must be ${L.minRateKmin}..${L.maxRateKmin} K/min`);
         if (!(s.range in RANGES) || s.range === 'off') errs.push(w + 'heater range must be low/medium/high');
+      }
+      if (s.type === 'goto') {
         if (s.mean_tol !== undefined && !(Number.isFinite(s.mean_tol) && s.mean_tol > 0 && s.mean_tol <= s.tol)) errs.push(w + 'mean error limit must be > 0 and no greater than the instantaneous error limit');
         if (s.esd_tol !== undefined && !(Number.isFinite(s.esd_tol) && s.esd_tol > 0)) errs.push(w + 'ESD tolerance must be > 0');
         if (!(Number.isFinite(s.tol) && s.tol > 0)) errs.push(w + 'tolerance must be > 0');
@@ -135,19 +140,22 @@
         if (!(Number.isFinite(minStab) && minStab >= avg)) errs.push(w + 'minimum stabilization time must be ≥ averaging duration');
         if (!(Number.isFinite(maxStab) && maxStab > minStab)) errs.push(w + 'maximum stabilization time must exceed minimum stabilization time');
       }
-      if (s.type === 'soak' && !(s.seconds >= 0)) errs.push(w + 'seconds must be ≥ 0');
+      if (s.type === 'measure' && (!Number.isInteger(s.repeats ?? 1) || (s.repeats ?? 1) < 1 || s.repeats > 10000)) errs.push(w + 'measurement count must be a whole number from 1 to 10000');
+      if (['measure','scan'].includes(s.type) && (!Number.isFinite(s.interval_s ?? 0) || (s.interval_s ?? 0) < 0 || s.interval_s > 86400)) errs.push(w + 'measurement interval must be 0..86400 s');
+      if (s.type === 'scan' && (!Number.isFinite(s.endpoint_tol) || s.endpoint_tol <= 0 || !Number.isFinite(s.timeout_s) || s.timeout_s <= 0 || s.timeout_s > 604800)) errs.push(w + 'scan needs a positive endpoint tolerance and timeout of at most 7 days');
+      if (s.type === 'soak' && (!Number.isFinite(s.seconds) || !(s.seconds >= 0))) errs.push(w + 'seconds must be finite and ≥ 0');
     });
     return errs;
   }
   function programWarnings(steps) {
-    return steps.length && !steps.some(s => s.type === 'measure') ? ['Program contains no measurement step'] : [];
+    return steps.length && !steps.some(s => ['measure','scan'].includes(s.type)) ? ['Program contains no measurement step'] : [];
   }
   function estimateDuration(steps, T0) {
     let T = T0 || 300, tot = 0;
     for (const s of steps) {
-      if (s.type === 'goto') {
+      if (s.type === 'goto' || s.type === 'scan') {
         const stabTime = s.min_stab_s !== undefined ? s.min_stab_s : (s.window_s || 60);
-        tot += Math.abs(s.T - T) / s.rate * 60 + stabTime;
+        tot += Math.abs(s.T - T) / s.rate * 60 + (s.type === 'goto' ? stabTime : 0);
         T = s.T;
       }
       else if (s.type === 'soak') tot += s.seconds;
@@ -232,6 +240,11 @@
     pause() { this._pause = true; Logger.info('PROG', 'Pause requested'); }
     resume() { this._pause = false; Logger.info('PROG', 'Resume'); }
     abort() { this._abort = true; Logger.warn('PROG', 'Abort requested'); }
+    updateProgram(steps) {
+      const errors=validateProgram(steps,this.limits);if(errors.length)throw Error(errors.join('; '));
+      if(steps.length<=this.index || steps.slice(0,this.index).some((s,i)=>JSON.stringify(s)!==JSON.stringify(this.steps[i])) || steps[this.index]?.type!==this.steps[this.index]?.type) throw Error('Completed steps and the active step type cannot change.');
+      this.steps=JSON.parse(JSON.stringify(steps));
+    }
     async _checkpoint() {
       while (this._pause && !this._abort) { this.state = 'paused'; await this.env.sleep(1); }
       if (this._abort) throw Object.assign(new Error('Aborted by user'), { aborted: true });
@@ -260,26 +273,41 @@
     async _exec(s) {
       const poll = this.env.pollSec || 2;
       if (s.type === 'goto') {
-        await this.c.setHeaterRange(s.range);
-        await this.c.setRamp(true, s.rate);
-        await this.c.setSetpoint(s.T, this.limits.maxK);
-        const t0 = this.env.now(), stability = new TemperatureStability(s);
+        const t0=this.env.now();let applied='',stability;
         for (;;) {
           await this._checkpoint();
+          s=this.steps[this.index];const key=JSON.stringify(s);
+          if(key!==applied) {await this.c.heaterOff();await this.c.setRamp(true,s.rate);await this.c.setSetpoint(s.T,this.limits.maxK);await this.c.setHeaterRange(s.range);stability=new TemperatureStability(s);applied=key;}
           const T = await this.c.readK(), ramping = await this.c.isRamping(), now = this.env.now();
           const status = stability.update(now, T, ramping);
           this.env.onTemp && this.env.onTemp({ t: now, T, setpoint: s.T, heater: await this.c.heaterPercent(), stability: status });
           if (status.stable) { Logger.info('PROG', `Stable at ${T.toFixed(3)} K (set ${s.T}; mean absolute error ${status.meanError.toFixed(4)} K over ${s.window_s} s)`); return; }
-          if (now - t0 > s.timeout_s) throw new Error(`Timeout: did not stabilise at ${s.T} K within ${s.timeout_s} s (last ${T.toFixed(3)} K)`);
+          if (now - t0 > (s.max_stab_s??s.timeout_s)) throw new Error(`Timeout: did not stabilise at ${s.T} K within ${s.max_stab_s??s.timeout_s} s (last ${T.toFixed(3)} K)`);
           await this.env.sleep(poll);
         }
       } else if (s.type === 'soak') {
         const t0 = this.env.now();
-        while (this.env.now() - t0 < s.seconds) { await this._checkpoint(); await this.env.sleep(Math.min(poll, s.seconds)); }
+        while (this.env.now() - t0 < this.steps[this.index].seconds) { await this._checkpoint(); await this.env.sleep(Math.min(poll, this.steps[this.index].seconds)); }
       } else if (s.type === 'measure') {
-        await this._checkpoint();
-        const T = await this.c.readK();
-        await this.env.measure({ stepIndex: this.index, step: s, T_set: await this.c.getSetpoint(), T_start: T, checkpoint: () => this._checkpoint() });
+        for(let n=0;n<(this.steps[this.index].repeats ?? 1);n++) {
+          await this._checkpoint();
+          const step={...this.steps[this.index]};this.measurement=n+1;
+          await this.env.measure({ stepIndex:this.index,step,T_set:await this.c.getSetpoint(),T_start:await this.c.readK(),measurement:n+1,temperatureMode:'step',checkpoint:()=>this._checkpoint() });
+          if(n+1<(this.steps[this.index].repeats??1) && step.interval_s>0)await this.env.sleep(step.interval_s);
+        }
+      } else if (s.type === 'scan') {
+        let applied='',direction=1;const started=this.env.now();let n=0;
+        for(;;) {
+          await this._checkpoint();
+          const step={...this.steps[this.index]},key=JSON.stringify([step.T,step.rate,step.range]);
+          if(key!==applied) { const current=await this.c.readK();direction=Math.sign(step.T-current)||1;await this.c.setRamp(true,step.rate);await this.c.setSetpoint(step.T,this.limits.maxK);await this.c.setHeaterRange(step.range);applied=key; }
+          const T=await this.c.readK();
+          if(direction*(step.T-T)<=step.endpoint_tol)break;
+          if(this.env.now()-started>=step.timeout_s)throw Error('Temperature scan timed out');
+          this.measurement=++n;
+          await this.env.measure({stepIndex:this.index,step,T_set:step.T,T_start:T,measurement:n,temperatureMode:'scan',checkpoint:()=>this._checkpoint()});
+          if(step.interval_s>0)await this.env.sleep(step.interval_s);
+        }
       } else if (s.type === 'heater_off') await this.c.heaterOff();
     }
   }

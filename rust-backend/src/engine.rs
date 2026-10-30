@@ -239,13 +239,25 @@ impl Config {
         for s in &steps {
             match tag(
                 &s["type"],
-                &["measure", "soak", "goto", "heater_off"],
+                &["measure", "scan", "soak", "goto", "heater_off"],
                 "program step",
             )? {
                 "soak" => {
                     positive(&s["seconds"], "Soak duration", 86400.)?;
                 }
-                "goto" => {
+                "measure" => {
+                    whole(
+                        s.get("repeats").unwrap_or(&json!(1)),
+                        1,
+                        10000,
+                        "Measurement count",
+                    )?;
+                    let interval = num(s.get("interval_s").unwrap_or(&json!(0)))?;
+                    if !(0. ..=86400.).contains(&interval) {
+                        return Err("Measurement interval must be 0..86400 seconds".into());
+                    }
+                }
+                "goto" | "scan" => {
                     if temp != "control" {
                         return Err("Temperature control is not enabled".into());
                     }
@@ -255,6 +267,30 @@ impl Config {
                         "Ramp rate",
                         num(&h["tempController"]["maxRateKmin"])?,
                     )?;
+                    let min_rate = num(h["tempController"]
+                        .get("minRateKmin")
+                        .unwrap_or(&json!(0.1)))?;
+                    let supported_min = if h["tempController"]["model"] == "LS335" {
+                        0.001
+                    } else {
+                        0.1
+                    };
+                    if min_rate < supported_min || min_rate > 100. || num(&s["rate"])? < min_rate {
+                        return Err(format!("Ramp rate is below the configured controller minimum ({min_rate} K/min)"));
+                    }
+                    tag(&s["range"], &["low", "medium", "high"], "heater range")?;
+                    if s["type"] == "scan" {
+                        if kind == "fixed" && mode["acq"] == "step" {
+                            return Err("Temperature scans require continuous angular acquisition; select angular scan, AC field, or CHIRP".into());
+                        }
+                        positive(&s["endpoint_tol"], "Scan endpoint tolerance", 100.)?;
+                        positive(&s["timeout_s"], "Scan timeout", 604800.)?;
+                        let interval = num(s.get("interval_s").unwrap_or(&json!(0)))?;
+                        if !(0. ..=86400.).contains(&interval) {
+                            return Err("Measurement interval must be 0..86400 seconds".into());
+                        }
+                        continue;
+                    }
                     let tol = positive(&s["tol"], "Tolerance", f64::MAX)?;
                     let mean = num(s.get("mean_tol").unwrap_or(&s["tol"]))?;
                     if mean <= 0. || mean > tol {
@@ -425,6 +461,18 @@ mod migration_tests {
         fault: u32,
         reference: f64,
         field: bool,
+        thermal: bool,
+        temperature: f64,
+        target: f64,
+        ramp_rate: f64,
+        heater: bool,
+        time_s: f64,
+        serial_ready_s: f64,
+        serial_commands_at: Vec<f64>,
+        delta_arm_ready_s: Option<f64>,
+        delta_arm_never_ready: bool,
+        delta_arm_polls: Vec<(f64, bool)>,
+        delta_starts_at: Vec<f64>,
     }
     struct FakeClock {
         ticks: AtomicU64,
@@ -437,8 +485,14 @@ mod migration_tests {
         fn sleep(&self, d: Duration) {
             self.ticks.fetch_add(d.as_micros() as u64, Ordering::SeqCst);
             let mut b = self.bench.lock().unwrap();
+            b.time_s += d.as_secs_f64();
             if b.moving {
                 b.position += b.velocity * d.as_secs_f64();
+            }
+            if b.thermal && b.heater {
+                let delta = b.target - b.temperature;
+                b.temperature +=
+                    delta.signum() * delta.abs().min(b.ramp_rate / 60. * d.as_secs_f64());
             }
         }
     }
@@ -462,6 +516,32 @@ mod migration_tests {
         fn write(&mut self, c: &str) -> R<()> {
             let mut b = self.b.lock().unwrap();
             b.commands.push((self.d.role.clone(), c.into()));
+            if c.starts_with("SYST:COMM:SER:SEND ") && !c.contains("*IDN?") {
+                if b.time_s + 1e-9 < b.serial_ready_s {
+                    return Err("Serial command sent before the previous command completed".into());
+                }
+                let now = b.time_s;
+                b.serial_commands_at.push(now);
+                b.serial_ready_s = now + 0.2;
+            }
+            if c == "SOUR:SWE:ABOR" {
+                b.delta_arm_ready_s = None;
+            }
+            if c == "SOUR:DELT:ARM" {
+                if b.time_s + 1e-9 < b.serial_ready_s {
+                    return Err("Arming before serial setup completed".into());
+                }
+                b.delta_arm_ready_s = Some(b.time_s + 0.8);
+            }
+            if c == "INIT:IMM" {
+                if b.delta_arm_never_ready
+                    || b.delta_arm_ready_s.is_none_or(|ready| b.time_s < ready)
+                {
+                    return Err("INIT sent before the serial arming handshake completed".into());
+                }
+                let now = b.time_s;
+                b.delta_starts_at.push(now);
+            }
             if let Some(v) = c.strip_prefix("PSET1=") {
                 b.position = number(v)?;
             }
@@ -475,6 +555,15 @@ mod migration_tests {
                 b.moving = false;
                 b.velocity = 0.;
             }
+            if let Some(value) = c.strip_prefix("SETP 1,") {
+                b.target = number(value)?;
+            }
+            if let Some(value) = c.strip_prefix("RAMP 1,1,") {
+                b.ramp_rate = number(value)?;
+            }
+            if let Some(value) = c.strip_prefix("RANGE 1,") {
+                b.heater = number(value)? > 0.;
+            }
             for prefix in ["SOUR:CURR ", "SOUR:DELT:HIGH "] {
                 if let Some(v) = c.strip_prefix(prefix) {
                     b.current = number(v)?;
@@ -486,7 +575,14 @@ mod migration_tests {
             Ok(())
         }
         fn query(&mut self, c: &str) -> R<String> {
-            let b = self.b.lock().unwrap();
+            let mut b = self.b.lock().unwrap();
+            if c == "SOUR:DELT:ARM?" {
+                let ready =
+                    !b.delta_arm_never_ready && b.delta_arm_ready_s.is_some_and(|t| b.time_s >= t);
+                let now = b.time_s;
+                b.delta_arm_polls.push((now, ready));
+                return Ok(u8::from(ready).to_string());
+            }
             Ok(match c {
                 "*IDN?" => {
                     if self.d.model == "SR830" {
@@ -533,8 +629,20 @@ mod migration_tests {
                     (b.current * 2. * (b.position / 4000. * std::f64::consts::TAU).cos())
                         .to_string()
                 }
-                "KRDG? A" => "300".into(),
-                "RAMPST? 1" => "0".into(),
+                "KRDG? A" => {
+                    if b.thermal {
+                        b.temperature.to_string()
+                    } else {
+                        "300".into()
+                    }
+                }
+                "RAMPST? 1" => {
+                    if b.thermal && (b.target - b.temperature).abs() > 1e-6 {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    }
+                }
                 _ => return Err(format!("Unexpected test query {c}")),
             })
         }
@@ -617,6 +725,35 @@ mod migration_tests {
             .commands
             .contains(&("source".into(), "SOUR:DELT:LOW -0.001".into())));
         assert!(!b.commands.iter().any(|(r, _)| r == "voltmeter"));
+        assert_eq!(b.serial_commands_at.len(), 4);
+        assert!(b
+            .serial_commands_at
+            .windows(2)
+            .all(|t| t[1] - t[0] >= 0.2 - 1e-9));
+        assert!(
+            b.delta_arm_polls.iter().any(|(_, ready)| !ready),
+            "Delayed serial handshake must be polled"
+        );
+        assert!(!b.delta_starts_at.is_empty());
+        for start in &b.delta_starts_at {
+            assert!(b
+                .delta_arm_polls
+                .iter()
+                .any(|(t, ready)| *ready && *t <= *start));
+        }
+    }
+    #[test]
+    fn delta_arming_timeout_never_initiates_and_cleans_up() {
+        let mut p = project();
+        p["hardware"]["measure"]["dc_mode"] = json!("delta");
+        let b = bench();
+        b.lock().unwrap().delta_arm_never_ready = true;
+        let error = exercise(p, b.clone()).0.unwrap_err();
+        assert!(error.contains("Delta did not arm within 10 seconds"));
+        off(&b);
+        let b = b.lock().unwrap();
+        assert!(b.delta_starts_at.is_empty());
+        assert!(!b.commands.iter().any(|(_, c)| c == "INIT:IMM"));
     }
     fn sweep(model: &str) -> Value {
         let mut p = project();
@@ -877,20 +1014,35 @@ mod migration_tests {
         }
     }
     #[test]
-    fn thermal_program_edits_are_limited_to_future_parameters() {
+    fn program_edits_allow_active_conditions_and_future_structure() {
         let mut p = project();
         p["tempProgram"] = json!([{"type":"measure","label":"first"},{"type":"soak","seconds":2}]);
         let j = Job::new();
         *j.desired.lock().unwrap() = p.clone();
         let mut next = p.clone();
         next["tempProgram"][0]["label"] = json!("changed");
-        assert!(j.update(next).is_err());
+        j.update(next).unwrap();
         let mut next = p.clone();
         next["tempProgram"][1]["seconds"] = json!(3);
         j.update(next).unwrap();
-        let mut next = p;
+        let mut next = p.clone();
         next["tempProgram"][1] = json!({"type":"measure"});
-        assert!(j.update(next).is_err());
+        j.update(next.clone()).unwrap();
+        next["tempProgram"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"soak","seconds":5}));
+        j.update(next.clone()).unwrap();
+        next["tempProgram"].as_array_mut().unwrap().truncate(1);
+        j.update(next).unwrap();
+        let mut next = p.clone();
+        next["tempProgram"][0] = json!({"type":"soak","seconds":3});
+        assert!(j.update(next).is_err(), "Active step type is fixed");
+        *j.desired.lock().unwrap() = p.clone();
+        j.state.lock().unwrap().step = 1;
+        let mut next = p;
+        next["tempProgram"][0]["label"] = json!("completed edit");
+        assert!(j.update(next).is_err(), "Completed steps are fixed");
     }
     #[test]
     fn temperature_setpoint_precedes_heating() {
@@ -912,6 +1064,235 @@ mod migration_tests {
                 < c.iter().position(|c| *c == "RANGE 1,1").unwrap()
         );
         assert_eq!(c.last(), Some(&"RANGE 1,0"));
+    }
+    #[test]
+    fn repeated_measurements_keep_individual_snapshots() {
+        let mut p = project();
+        p["tempProgram"] = json!([{"type":"measure","repeats":3,"interval_s":0.1}]);
+        let b = bench();
+        let (result, job) = exercise(p, b.clone());
+        result.unwrap();
+        off(&b);
+        let status = job.state.lock().unwrap();
+        assert_eq!(status.runs.len(), 3);
+        for (i, run) in status.runs.iter().enumerate() {
+            assert_eq!(run["measurement"], i + 1);
+            assert_eq!(run["programStep"]["repeats"], 3);
+        }
+    }
+    struct PauseAfterMeasurementClock {
+        clock: FakeClock,
+        job: Arc<Job>,
+        fired: AtomicBool,
+    }
+    impl Clock for PauseAfterMeasurementClock {
+        fn now(&self) -> Duration {
+            self.clock.now()
+        }
+        fn sleep(&self, d: Duration) {
+            self.clock.sleep(d);
+            if self.job.state.lock().unwrap().completed_measurements >= 1
+                && !self.fired.swap(true, Ordering::SeqCst)
+            {
+                self.job.pause.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+    #[test]
+    fn resume_does_not_repeat_completed_measurements() {
+        let mut p = project();
+        p["tempProgram"] = json!([{"type":"measure","repeats":3,"interval_s":1}]);
+        let config = Config::parse(p.clone()).unwrap();
+        let job = Job::new();
+        *job.desired.lock().unwrap() = p.clone();
+        let b = bench();
+        let mut hw = FakeHardware(b.clone());
+        let clock = Arc::new(PauseAfterMeasurementClock {
+            clock: FakeClock {
+                ticks: AtomicU64::new(0),
+                bench: b.clone(),
+            },
+            job: job.clone(),
+            fired: AtomicBool::new(false),
+        });
+        assert_eq!(
+            Runtime::new(&config, &job, &mut hw, clock)
+                .execute()
+                .unwrap_err(),
+            "Pause requested"
+        );
+        assert_eq!(job.state.lock().unwrap().runs.len(), 1);
+        assert_eq!(job.state.lock().unwrap().completed_measurements, 1);
+        job.pause.store(false, Ordering::SeqCst);
+        p["_resumeStep"] = json!(0);
+        let config = Config::parse(p).unwrap();
+        let clock = Arc::new(FakeClock {
+            ticks: AtomicU64::new(0),
+            bench: b.clone(),
+        });
+        Runtime::new(&config, &job, &mut hw, clock)
+            .execute()
+            .unwrap();
+        off(&b);
+        let state = job.state.lock().unwrap();
+        assert_eq!(state.runs.len(), 3);
+        assert_eq!(state.runs[2]["measurement"], 3);
+    }
+    fn scan_project(target: f64) -> Value {
+        let mut p = project();
+        p["hardware"]["temperature"] = json!("control");
+        p["hardware"]["tempController"] = json!({"model":"LS335","address":"GPIB0::12::INSTR","input":"A","loop":1,"maxK":400,"maxRateKmin":10});
+        p["method"]["fixed"]["acq"] = json!("scan");
+        p["tempProgram"] = json!([{"type":"scan","T":target,"rate":1.,"range":"low","endpoint_tol":0.001,"timeout_s":120.,"interval_s":0}]);
+        p
+    }
+    #[test]
+    fn heating_and_cooling_scan_continuously_and_average_temperature() {
+        for target in [300.5, 299.5] {
+            let b = bench();
+            {
+                let mut state = b.lock().unwrap();
+                state.thermal = true;
+                state.temperature = 300.;
+                state.target = 300.;
+            }
+            let (result, job) = exercise(scan_project(target), b.clone());
+            result.unwrap();
+            off(&b);
+            let state = job.state.lock().unwrap();
+            assert!(state.runs.len() > 1);
+            for run in &state.runs {
+                assert_eq!(run["temperatureMode"], "scan");
+                assert_eq!(run["continuousAcquisition"], true);
+                assert!(num(&run["temperatureStats"]["span"]).unwrap() > 0.);
+                let mean = num(&run["T_mean"]).unwrap();
+                let min = num(&run["temperatureStats"]["min"]).unwrap();
+                let max = num(&run["temperatureStats"]["max"]).unwrap();
+                assert!(min <= mean && mean <= max);
+            }
+            let commands = &b.lock().unwrap().commands;
+            assert_eq!(
+                commands.iter().filter(|(_, c)| c == "VGO1").count(),
+                1,
+                "Rotation continues between acquisition windows"
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|(_, c)| c == "SOUR:CURR 0.001")
+                    .count(),
+                1,
+                "Excitation continues between acquisition windows"
+            );
+        }
+    }
+    #[test]
+    fn continuous_scan_validates_method_and_count() {
+        let mut p = scan_project(301.);
+        p["method"]["fixed"]["acq"] = json!("step");
+        assert!(Config::parse(p).is_err());
+        let mut p = project();
+        p["tempProgram"][0]["repeats"] = json!(0);
+        assert!(Config::parse(p).is_err());
+        let mut p = scan_project(301.);
+        p["tempProgram"][0]["rate"] = json!(0.001);
+        assert!(Config::parse(p.clone()).is_err());
+        p["hardware"]["tempController"]["minRateKmin"] = json!(0.001);
+        assert!(Config::parse(p).is_ok());
+    }
+    #[test]
+    fn scan_timeout_disables_excitation_motion_and_heater() {
+        let mut p = scan_project(301.);
+        p["tempProgram"][0]["timeout_s"] = json!(2.);
+        let b = bench();
+        let (result, job) = exercise(p, b.clone());
+        assert!(result.unwrap_err().contains("timed out"));
+        off(&b);
+        assert!(!job.state.lock().unwrap().runs.is_empty());
+        assert_eq!(
+            b.lock()
+                .unwrap()
+                .commands
+                .iter()
+                .filter(|(role, _)| role == "temperature")
+                .last()
+                .unwrap()
+                .1,
+            "RANGE 1,0"
+        );
+    }
+    #[test]
+    fn active_stabilization_target_updates_without_restarting_program() {
+        let mut p = scan_project(301.);
+        p["tempProgram"] = json!([{"type":"goto","T":301.,"rate":1.,"range":"low","tol":0.01,"mean_tol":0.005,"window_s":2.,"timeout_s":90.},{"type":"measure"}]);
+        let config = Config::parse(p.clone()).unwrap();
+        let job = Job::new();
+        *job.desired.lock().unwrap() = p.clone();
+        let mut next = p;
+        next["tempProgram"][0]["T"] = json!(300.05);
+        let b = bench();
+        {
+            let mut state = b.lock().unwrap();
+            state.thermal = true;
+            state.temperature = 300.;
+            state.target = 300.;
+        }
+        let mut hardware = FakeHardware(b.clone());
+        let clock = Arc::new(ChangeClock {
+            clock: FakeClock {
+                ticks: AtomicU64::new(0),
+                bench: b.clone(),
+            },
+            job: job.clone(),
+            update: Mutex::new(Some(next)),
+            pause: false,
+            fired: AtomicBool::new(false),
+        });
+        Runtime::new(&config, &job, &mut hardware, clock)
+            .execute()
+            .unwrap();
+        off(&b);
+        let state = job.state.lock().unwrap();
+        assert_eq!(state.runs.len(), 1);
+        assert_eq!(state.runs[0]["T_set"], 300.05);
+    }
+    #[test]
+    fn active_repeat_count_and_future_structure_take_effect_at_measurement_boundary() {
+        let mut p = project();
+        p["tempProgram"] = json!([{"type":"measure","repeats":3}]);
+        let config = Config::parse(p.clone()).unwrap();
+        let job = Job::new();
+        *job.desired.lock().unwrap() = p.clone();
+        let mut next = p;
+        next["tempProgram"][0]["repeats"] = json!(2);
+        next["method"]["fixed"]["I_mA"] = json!(2);
+        next["tempProgram"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"measure"}));
+        let b = bench();
+        let mut hardware = FakeHardware(b.clone());
+        let clock = Arc::new(ChangeClock {
+            clock: FakeClock {
+                ticks: AtomicU64::new(0),
+                bench: b.clone(),
+            },
+            job: job.clone(),
+            update: Mutex::new(Some(next)),
+            pause: false,
+            fired: AtomicBool::new(false),
+        });
+        Runtime::new(&config, &job, &mut hardware, clock)
+            .execute()
+            .unwrap();
+        off(&b);
+        let state = job.state.lock().unwrap();
+        assert_eq!(state.runs.len(), 3);
+        assert_eq!(state.runs[0]["method"]["fixed"]["I_mA"], 1);
+        assert_eq!(state.runs[1]["method"]["fixed"]["I_mA"], 2);
+        assert_eq!(state.runs[2]["method"]["fixed"]["I_mA"], 2);
+        assert_eq!(state.runs[0]["programStep"]["repeats"], 3);
+        assert_eq!(state.runs[1]["programStep"]["repeats"], 2);
     }
     #[test]
     fn autosave_is_loadable() {
@@ -938,6 +1319,8 @@ pub struct Status {
     pub state: String,
     pub message: String,
     pub step: usize,
+    pub measurement: usize,
+    pub completed_measurements: usize,
     pub runs: Vec<Value>,
     pub errors: Vec<String>,
     pub temperature: Option<f64>,
@@ -992,14 +1375,11 @@ impl Job {
         }
         let old = desired["tempProgram"].as_array().ok_or("Missing program")?;
         let next = project["tempProgram"].as_array().ok_or("Missing program")?;
-        if old.len() != next.len()
-            || old
-                .iter()
-                .zip(next)
-                .enumerate()
-                .any(|(i, (a, b))| a["type"] != b["type"] || (i <= step && a != b))
+        if next.len() <= step
+            || old.iter().take(step).zip(next).any(|(a, b)| a != b)
+            || old[step]["type"] != next[step]["type"]
         {
-            return Err("Only future step parameters can change; active/completed steps and sequence structure are fixed".into());
+            return Err("Completed steps and the active step type cannot change. Edit active parameters or replace future steps.".into());
         }
         *desired = project;
         Ok(())
@@ -1007,7 +1387,7 @@ impl Job {
     pub fn status(&self, cursor: usize) -> Value {
         *self.heartbeat.lock().unwrap() = Instant::now();
         let s = self.state.lock().unwrap();
-        json!({"id":self.id,"state":s.state,"message":s.message,"step":s.step,"runs":s.runs.get(cursor..).unwrap_or(&[]),"count":s.runs.len(),"cleanupErrors":s.errors,"temperatureK":s.temperature,"setpointK":s.setpoint,"current_mA":s.current_ma,"outputOn":s.output_on,"voltageX":s.voltage_x,"voltageY":s.voltage_y,"angleDeg":s.angle_deg,"counter":s.counter,"tempStatus":s.temp_status})
+        json!({"id":self.id,"state":s.state,"message":s.message,"step":s.step,"measurement":s.measurement,"runs":s.runs.get(cursor..).unwrap_or(&[]),"count":s.runs.len(),"cleanupErrors":s.errors,"temperatureK":s.temperature,"setpointK":s.setpoint,"current_mA":s.current_ma,"outputOn":s.output_on,"voltageX":s.voltage_x,"voltageY":s.voltage_y,"angleDeg":s.angle_deg,"counter":s.counter,"tempStatus":s.temp_status})
     }
     fn checkpoint(&self) -> R<()> {
         if self.abort.load(Ordering::SeqCst) {
@@ -1245,6 +1625,27 @@ impl<'a> Runtime<'a> {
     fn sw(&mut self, c: &str) -> R<()> {
         self.source.as_mut().ok_or("Source not open")?.write(c)
     }
+    fn delta_write(&mut self, command: &str) -> R<()> {
+        self.job.checkpoint()?;
+        self.sw(command)?;
+        self.sleep(instruments::DELTA_COMMAND_WAIT.as_secs_f64())
+    }
+    fn wait_delta_armed(&mut self) -> R<()> {
+        let deadline = self.clock.now() + Duration::from_secs(10);
+        self.sleep(0.5)?; // Let the source begin its serial handshake before polling.
+        loop {
+            self.job.checkpoint()?;
+            match register(&self.sq("SOUR:DELT:ARM?")?)? {
+                1 => return Ok(()),
+                0 => (),
+                _ => return Err("Invalid Delta armed status".into()),
+            }
+            if self.clock.now() >= deadline {
+                return Err("Delta did not arm within 10 seconds; check the 2182/2182A serial and Trigger Link connections".into());
+            }
+            self.sleep(instruments::DELTA_COMMAND_WAIT.as_secs_f64())?;
+        }
+    }
     fn tw(&mut self, c: &str) -> R<()> {
         self.temp
             .as_mut()
@@ -1366,6 +1767,9 @@ impl<'a> Runtime<'a> {
             num(&self.c.h["source"]["compliance_V"])?
         ))?;
         self.sw("SOUR:SWE:ABOR")?;
+        if self.c.exc == "delta" {
+            self.sleep(instruments::DELTA_COMMAND_WAIT.as_secs_f64())?;
+        }
         self.sq("STAT:MEAS?")?;
         if self.c.volt {
             let commands = vec![
@@ -1379,10 +1783,10 @@ impl<'a> Runtime<'a> {
             ];
             if self.c.exc == "delta" {
                 for c in commands {
-                    self.sw(&format!("SYST:COMM:SER:SEND \"{c}\""))?;
+                    self.delta_write(&format!("SYST:COMM:SER:SEND \"{c}\""))?;
                 }
-                self.sw("FORM:DATA ASC")?;
-                self.sw("FORM:ELEM READ")?;
+                self.delta_write("FORM:DATA ASC")?;
+                self.delta_write("FORM:ELEM READ")?;
             } else {
                 let v = self.volt.as_mut().unwrap();
                 v.write("ABOR")?;
@@ -1407,47 +1811,165 @@ impl<'a> Runtime<'a> {
         }
         Ok(())
     }
+    fn refresh_config(&mut self) -> R<()> {
+        let desired = self.job.desired.lock().unwrap().clone();
+        if desired.is_null() || desired == self.c.project {
+            return Ok(());
+        }
+        let next = Config::parse(desired)?;
+        let method_changed = next.m != self.c.m;
+        if method_changed {
+            self.stop()?;
+            self.output_off()?;
+        }
+        self.c = next;
+        if method_changed {
+            self.configure()?;
+        }
+        Ok(())
+    }
     fn program(&mut self) -> R<()> {
         self.configure()?;
         let resume = self.c.project["_resumeStep"].as_u64().unwrap_or(0) as usize;
+        let resuming = self.c.project["_resumeStep"].is_u64();
         if self.c.h["temperature"] == "control" && resume > 0 {
-            if let Some(s) = self.c.steps[..resume]
+            if let Some(step) = self.c.steps[..resume]
                 .iter()
                 .rev()
                 .find(|s| s["type"] == "goto" || s["type"] == "heater_off")
                 .cloned()
             {
-                if s["type"] == "goto" {
-                    self.goto(&s)?;
+                if step["type"] == "goto" {
+                    self.goto(&step)?;
                 }
             }
         }
-        for i in resume..self.c.steps.len() {
-            self.job.state.lock().unwrap().step = i;
+        let mut i = resume;
+        loop {
             self.job.checkpoint()?;
-            let desired = self.job.desired.lock().unwrap().clone();
-            if !desired.is_null()
-                && (desired["method"] != self.c.m
-                    || desired["tempProgram"] != self.c.project["tempProgram"])
             {
-                self.stop()?;
-                self.sw("OUTP OFF")?;
-                self.c = Config::parse(desired)?;
-                self.configure()?;
+                let desired = self.job.desired.lock().unwrap();
+                let len = desired["tempProgram"]
+                    .as_array()
+                    .map_or(self.c.steps.len(), Vec::len);
+                if i >= len {
+                    break;
+                }
+                let mut status = self.job.state.lock().unwrap();
+                status.step = i;
+                status.measurement = 0;
+                if !resuming || i != resume {
+                    status.completed_measurements = 0;
+                }
             }
-            let s = self.c.steps[i].clone();
-            {
-                let mut st = self.job.state.lock().unwrap();
-                st.step = i;
-                st.message = format!("Step {}: {}", i + 1, text(&s["type"])?);
-            }
-            match text(&s["type"])? {
-                "measure" => self.acquire(&s)?,
-                "soak" => self.sleep(num(&s["seconds"])?)?,
+            self.refresh_config()?;
+            let step = self.c.steps[i].clone();
+            self.job.state.lock().unwrap().message =
+                format!("Step {}: {}", i + 1, text(&step["type"])?);
+            match text(&step["type"])? {
+                "measure" => {
+                    let mut measurement = self.job.state.lock().unwrap().completed_measurements;
+                    loop {
+                        self.refresh_config()?;
+                        let step = self.c.steps[i].clone();
+                        let count = step["repeats"].as_u64().unwrap_or(1) as usize;
+                        if measurement >= count {
+                            break;
+                        }
+                        self.job.state.lock().unwrap().measurement = measurement + 1;
+                        self.job.state.lock().unwrap().message = format!(
+                            "Step {}: measurement {} / {}",
+                            i + 1,
+                            measurement + 1,
+                            count
+                        );
+                        self.acquire(&step)?;
+                        measurement += 1;
+                        self.job.state.lock().unwrap().completed_measurements = measurement;
+                        let interval = step["interval_s"].as_f64().unwrap_or(0.);
+                        if measurement < count && interval > 0. {
+                            self.sleep(interval)?;
+                        }
+                    }
+                }
+                "scan" => self.scan(i)?,
+                "soak" => {
+                    let started = self.clock.now();
+                    loop {
+                        self.refresh_config()?;
+                        if (self.clock.now() - started).as_secs_f64()
+                            >= num(&self.c.steps[i]["seconds"])?
+                        {
+                            break;
+                        }
+                        self.sleep(0.2)?;
+                    }
+                }
                 "heater_off" => self.heater_off()?,
-                _ => self.goto(&s)?,
-            };
+                _ => self.goto(&step)?,
+            }
+            i += 1;
         }
+        Ok(())
+    }
+    fn thermal_target(&mut self, step: &Value) -> R<()> {
+        let loopn = self.c.h["tempController"]["loop"].as_u64().unwrap();
+        self.tw(&format!("RAMP {loopn},1,{:.3}", num(&step["rate"])?))?;
+        let target = num(&step["T"])?;
+        self.tw(&format!("SETP {loopn},{target}"))?;
+        self.job.state.lock().unwrap().setpoint = Some(target);
+        let range = match text(&step["range"])? {
+            "low" => 1,
+            "medium" => 2,
+            _ => 3,
+        };
+        self.tw(&if self.c.h["tempController"]["model"] == "LS332" {
+            format!("RANGE {range}")
+        } else {
+            format!("RANGE {loopn},{range}")
+        })?;
+        Ok(())
+    }
+    fn scan(&mut self, index: usize) -> R<()> {
+        let started = self.clock.now();
+        let mut applied = Value::Null;
+        let mut direction = 1.;
+        let mut count = self.job.state.lock().unwrap().completed_measurements;
+        loop {
+            self.job.checkpoint()?;
+            self.refresh_config()?;
+            let step = self.c.steps[index].clone();
+            let current = self
+                .temperature()?
+                .ok_or("Temperature scans require a sensor")?;
+            let target = num(&step["T"])?;
+            let settings = json!([step["T"], step["rate"], step["range"]]);
+            if settings != applied {
+                direction = if target >= current { 1. } else { -1. };
+                self.thermal_target(&step)?;
+                applied = settings;
+            }
+            if direction * (target - current) <= num(&step["endpoint_tol"])? {
+                break;
+            }
+            if (self.clock.now() - started).as_secs_f64() >= num(&step["timeout_s"])? {
+                return Err("Temperature scan timed out".into());
+            }
+            count += 1;
+            self.job.state.lock().unwrap().measurement = count;
+            self.job.state.lock().unwrap().message = format!(
+                "Step {}: scan to {target} K, measurement {count}",
+                index + 1
+            );
+            self.acquire(&step)?;
+            self.job.state.lock().unwrap().completed_measurements = count;
+            let interval = step["interval_s"].as_f64().unwrap_or(0.);
+            if interval > 0. {
+                self.sleep(interval)?;
+            }
+        }
+        self.output_off()?;
+        self.stop()?;
         Ok(())
     }
     fn motor_angle(&mut self) -> R<f64> {
@@ -1561,6 +2083,8 @@ impl<'a> Runtime<'a> {
         let i = ma / 1000.;
         match self.c.exc.as_str() {
             "delta" => {
+                // Disarming also communicates with the voltmeter over serial.
+                self.sleep(instruments::DELTA_COMMAND_WAIT.as_secs_f64())?;
                 for c in [
                     "UNIT VOLT".into(),
                     format!("SOUR:DELT:HIGH {}", i.abs()),
@@ -1568,11 +2092,12 @@ impl<'a> Runtime<'a> {
                     "SOUR:DELT:DEL 0.1".into(),
                     "SOUR:DELT:COUN INF".into(),
                     "SOUR:DELT:CAB ON".into(),
-                    "SOUR:DELT:ARM".into(),
-                    "INIT:IMM".into(),
                 ] {
-                    self.sw(&c)?;
+                    self.delta_write(&c)?;
                 }
+                self.sw("SOUR:DELT:ARM")?;
+                self.wait_delta_armed()?;
+                self.delta_write("INIT:IMM")?;
             }
             "ac" => {
                 let fc = num(&self.c.mode["carrier_hz"])?;
@@ -1740,6 +2265,44 @@ impl<'a> Runtime<'a> {
         self.started_iso = timestamp();
         self.pending = Some(Samples::default());
         let f = self.c.mode.clone();
+        // Single-current continuous modes keep excitation and rotation running
+        // across saved acquisition windows. Other modes retain their required
+        // current switching, reversals, background and settling sequence.
+        if self.continuous_scan(step) {
+            let hz = num(&f["rot_hz"])?;
+            if !self.velocity {
+                self.rotate(hz, 1)?;
+            }
+            let ma = self.c.levels[0];
+            let ready = {
+                let status = self.job.state.lock().unwrap();
+                status.output_on && status.current_ma == ma
+            };
+            if !ready {
+                self.current(ma)?;
+                if !self.c.volt {
+                    let reference = num(&f["carrier_hz"])?
+                        + if self.c.kind == "rotating" {
+                            if f["sideband"] == "lower" {
+                                -hz
+                            } else {
+                                hz
+                            }
+                        } else {
+                            0.
+                        };
+                    self.wait_lock(reference)?;
+                }
+                self.sleep((5. * self.tc).max(1.))?;
+            }
+            let duration = if self.c.kind == "rotating" {
+                num(&f["duration_s"])?
+            } else {
+                1. / hz
+            };
+            self.collect(ma, duration, 0., 1, None)?;
+            return self.save_run(false);
+        }
         if self.c.kind == "fixed" && f["acq"] == "step" {
             let n = f["n_angles"].as_u64().unwrap();
             for k in 0..n {
@@ -1823,15 +2386,33 @@ impl<'a> Runtime<'a> {
     }
     fn save_run(&mut self, incomplete: bool) -> R<()> {
         let s = self.pending.take().ok_or("Missing raw samples")?;
-        let temps: Vec<_> = s.T.iter().flatten().copied().collect();
-        let mean = if temps.is_empty() {
-            None
-        } else {
-            Some(temps.iter().sum::<f64>() / temps.len() as f64)
-        };
+        let stats = acquisition_temperature(&s);
+        let mean = stats["mean"].clone();
+        let index = self.job.state.lock().unwrap().step;
+        let step = self.c.steps.get(index).cloned().unwrap_or(Value::Null);
         let r = json!({"method":self.c.m,"sample":self.c.project["sample"],"hardware":self.c.h,"samples":s,"simulated":false,"T_mean":mean,"T_set":self.job.state.lock().unwrap().setpoint,"started":self.started_iso,"label":self.label,"positionSource":self.position,"incomplete":incomplete,"rsq_ohm":null,"detectionKind":if self.c.kind=="rotating"{"field-lockin"}else{"angular"},"acquisitionNotes":["Software-polled samples; timestamps bracket position/voltage reads. Validate timing, phase and filter response on the bench."]});
+        let mut r = r;
+        r["temperatureStats"] = stats;
+        r["temperatureMode"] = json!(if step["type"] == "scan" {
+            "scan"
+        } else if self.c.h["temperature"] == "off" {
+            "ambient"
+        } else {
+            "step"
+        });
+        r["programStep"] = step;
+        r["continuousAcquisition"] = json!(self.continuous_scan(&r["programStep"]));
+        r["measurement"] = json!(self.job.state.lock().unwrap().measurement);
         self.job.state.lock().unwrap().runs.push(r);
         Ok(())
+    }
+    fn continuous_scan(&self, step: &Value) -> bool {
+        step["type"] == "scan"
+            && step["interval_s"].as_f64().unwrap_or(0.) == 0.
+            && self.c.kind != "chirp"
+            && self.c.exc != "delta"
+            && self.c.levels.len() == 1
+            && !self.c.mode["background"].as_bool().unwrap_or(false)
     }
     fn heater_off(&mut self) -> R<()> {
         let c = &self.c.h["tempController"];
@@ -1842,121 +2423,107 @@ impl<'a> Runtime<'a> {
         };
         self.tw(&command)
     }
-    fn goto(&mut self, s: &Value) -> R<()> {
-        let loopn = self.c.h["tempController"]["loop"].as_u64().unwrap();
-        let range = match text(&s["range"])? {
-            "low" => 1,
-            "medium" => 2,
-            _ => 3,
-        };
-        self.heater_off()?;
-        self.tw(&format!("RAMP {loopn},1,{}", num(&s["rate"])?))?;
-        let target = num(&s["T"])?;
-        self.tw(&format!("SETP {loopn},{target}"))?;
-        self.job.state.lock().unwrap().setpoint = Some(target);
-        self.tw(&if self.c.h["tempController"]["model"] == "LS332" {
-            format!("RANGE {range}")
-        } else {
-            format!("RANGE {loopn},{range}")
-        })?;
-        let max_stab_s = s
-            .get("max_stab_s")
-            .or_else(|| s.get("timeout_s"))
-            .map(num)
-            .transpose()?
-            .unwrap_or(3600.);
-        let avg_s = s
-            .get("avg_s")
-            .or_else(|| s.get("window_s"))
-            .map(num)
-            .transpose()?
-            .unwrap_or(30.);
-        let min_stab_s = s
-            .get("min_stab_s")
-            .or_else(|| s.get("window_s"))
-            .map(num)
-            .transpose()?
-            .unwrap_or(avg_s)
-            .max(avg_s);
-        let tol = num(&s["tol"])?;
-        let mean_tol = s.get("mean_tol").map(num).transpose()?.unwrap_or(tol);
-        let esd_tol = s.get("esd_tol").map(num).transpose()?.unwrap_or(tol);
-
-        let end = self.clock.now() + Duration::from_secs_f64(max_stab_s);
+    fn goto(&mut self, initial: &Value) -> R<()> {
+        let started = self.clock.now();
+        let mut applied = Value::Null;
         let mut in_band_since: Option<f64> = None;
-        let mut window_readings: Vec<(f64, f64)> = Vec::new(); // (t_s, T_reading)
-
-        while self.clock.now() < end {
+        let mut readings: Vec<(f64, f64)> = Vec::new();
+        loop {
+            self.job.checkpoint()?;
+            self.refresh_config()?;
+            let index = self.job.state.lock().unwrap().step;
+            let step = self
+                .c
+                .steps
+                .get(index)
+                .filter(|s| s["type"] == "goto")
+                .unwrap_or(initial)
+                .clone();
+            if step != applied {
+                self.heater_off()?;
+                self.thermal_target(&step)?;
+                in_band_since = None;
+                readings.clear();
+                applied = step.clone();
+            }
+            let target = num(&step["T"])?;
+            let timeout = num(step.get("max_stab_s").unwrap_or(&step["timeout_s"]))?;
+            if (self.clock.now() - started).as_secs_f64() >= timeout {
+                return Err("Temperature stabilization timed out".into());
+            }
             self.sleep(1.)?;
             self.temp_at = None;
-            let t = self.temperature()?.ok_or("No temperature reader")?;
+            let temperature = self.temperature()?.ok_or("No temperature reader")?;
             let now = self.clock.now().as_secs_f64();
-            let error = (t - target).abs();
+            let error = (temperature - target).abs();
+            let loopn = self.c.h["tempController"]["loop"].as_u64().unwrap();
             let ramp = self
                 .temp
                 .as_mut()
                 .unwrap()
                 .query(&format!("RAMPST? {loopn}"))?
                 != "0";
-
+            let tol = num(&step["tol"])?;
+            let avg = num(step.get("avg_s").unwrap_or(&step["window_s"]))?;
+            let min_stab = num(step.get("min_stab_s").unwrap_or(&step["window_s"]))?;
             if error > tol || ramp {
                 in_band_since = None;
-                window_readings.clear();
-                self.job.state.lock().unwrap().temp_status = Some(json!({
-                    "targetK": target,
-                    "actualK": t,
-                    "deltaK": error,
-                    "ramping": ramp,
-                    "stable": false,
-                    "stableForS": 0.0,
-                    "minStabS": min_stab_s,
-                    "avgS": avg_s,
-                    "maxStabS": max_stab_s
-                }));
-                continue;
+                readings.clear();
+            } else {
+                if in_band_since.is_none() {
+                    in_band_since = Some(now);
+                }
+                readings.push((now, temperature));
             }
-
-            if in_band_since.is_none() {
-                in_band_since = Some(now);
+            let cutoff = now - avg;
+            while readings.len() > 1 && readings[1].0 <= cutoff {
+                readings.remove(0);
             }
-            let stable_for = now - in_band_since.unwrap();
-
-            window_readings.push((now, t));
-            let cutoff = now - avg_s;
-            while window_readings.len() > 1 && window_readings[1].0 <= cutoff {
-                window_readings.remove(0);
-            }
-
-            let stats = temperature_window(&window_readings, cutoff, avg_s, target);
-            let covered = stats.is_some();
-            let (mean_delta, esd) = stats.unwrap_or((error, 0.));
-
-            let is_stable = !ramp
-                && covered
-                && stable_for >= min_stab_s
-                && mean_delta <= mean_tol
-                && esd <= esd_tol;
-
-            self.job.state.lock().unwrap().temp_status = Some(json!({
-                "targetK": target,
-                "actualK": t,
-                "deltaK": error,
-                "meanDeltaK": mean_delta,
-                "esdK": esd,
-                "ramping": ramp,
-                "stable": is_stable,
-                "stableForS": stable_for,
-                "minStabS": min_stab_s,
-                "avgS": avg_s,
-                "maxStabS": max_stab_s
-            }));
-
-            if is_stable {
+            let stats = temperature_window(&readings, cutoff, avg, target);
+            let stable_for = in_band_since.map_or(0., |t| now - t);
+            let stable = !ramp
+                && stats.is_some_and(|(mean, esd)| {
+                    mean <= step.get("mean_tol").and_then(Value::as_f64).unwrap_or(tol)
+                        && esd <= step.get("esd_tol").and_then(Value::as_f64).unwrap_or(tol)
+                })
+                && stable_for >= min_stab;
+            self.job.state.lock().unwrap().temp_status = Some(
+                json!({"targetK":target,"actualK":temperature,"deltaK":error,"meanDeltaK":stats.map(|s|s.0),"esdK":stats.map(|s|s.1),"ramping":ramp,"stable":stable,"stableForS":stable_for,"minStabS":min_stab,"avgS":avg,"maxStabS":timeout}),
+            );
+            if stable {
                 return Ok(());
             }
         }
-        Err("Temperature stabilization timed out".into())
     }
+}
+
+fn acquisition_temperature(samples: &Samples) -> Value {
+    let mut integral = 0.;
+    let mut weight = 0.;
+    let mut values = Vec::new();
+    for i in 0..samples.T.len() {
+        if samples.valid[i] == 0 {
+            continue;
+        }
+        if let Some(t) = samples.T[i] {
+            values.push(t);
+            if i > 0 && samples.valid[i - 1] != 0 {
+                if let Some(previous) = samples.T[i - 1] {
+                    let dt = samples.t[i] - samples.t[i - 1];
+                    if dt > 0. {
+                        integral += (previous + t) * dt / 2.;
+                        weight += dt;
+                    }
+                }
+            }
+        }
+    }
+    if values.is_empty() {
+        return json!({"mean":null,"min":null,"max":null,"start":null,"end":null,"span":null,"method":"unavailable"});
+    }
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    json!({"mean":if weight>0. {integral/weight}else{values.iter().sum::<f64>()/values.len() as f64},"min":min,"max":max,"span":max-min,"start":values.first(),"end":values.last(),"method":if weight>0. {"time-weighted"}else{"sample-mean"}})
 }
 
 // Integrate absolute error over a complete rolling window. Opposite temperature
@@ -2005,5 +2572,20 @@ mod temperature_window_tests {
         let (error, _) =
             temperature_window(&[(0., 300.04), (2., 300.), (10., 300.)], 0., 10., 300.).unwrap();
         assert!((error - 0.004).abs() < 1e-10);
+    }
+    #[test]
+    fn acquisition_mean_is_time_weighted_and_excludes_masked_temperature() {
+        let mut samples = super::Samples {
+            t: vec![0., 1., 10.],
+            T: vec![Some(300.), Some(302.), Some(302.)],
+            valid: vec![1, 1, 1],
+            ..Default::default()
+        };
+        let stats = super::acquisition_temperature(&samples);
+        assert!((stats["mean"].as_f64().unwrap() - 301.9).abs() < 1e-10);
+        samples.valid[2] = 0;
+        assert_eq!(super::acquisition_temperature(&samples)["mean"], 301.);
+        samples.valid.fill(0);
+        assert!(super::acquisition_temperature(&samples)["mean"].is_null());
     }
 }

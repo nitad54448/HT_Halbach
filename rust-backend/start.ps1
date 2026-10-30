@@ -28,6 +28,10 @@ $releaseBinary = Join-Path $PSScriptRoot 'target/release/halbach-service.exe'
 $newestSource = Get-ChildItem -Path (Join-Path $PSScriptRoot 'src'), (Join-Path $PSScriptRoot 'Cargo.toml'), (Join-Path $PSScriptRoot 'Cargo.lock') -Recurse -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
 $needsBuild = -not (Test-Path -LiteralPath $releaseBinary) -or ($newestSource -and $newestSource.LastWriteTimeUtc -gt (Get-Item -LiteralPath $releaseBinary).LastWriteTimeUtc)
 if ($needsBuild) {
+    $runningRelease = Get-Process -Name halbach-service -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $releaseBinary }
+    if ($runningRelease) {
+        throw 'An older workstation service is still running. Stop it with stop-workstation.bat (updated services) or press Esc then Ctrl+Break in its service window, then run start-workstation.bat again. Refreshing the browser does not update the Rust service.'
+    }
     if (-not $cargoBinary -or -not (Test-Path -LiteralPath $cargoBinary)) { throw 'Sources have changed. Install Rust with rustup to build the current service; an outdated binary will not be started.' }
     & $cargoBinary build --release --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
     if ($LASTEXITCODE -ne 0) { throw 'Service build failed. Stop any previous service before rebuilding, then run the launcher again.' }

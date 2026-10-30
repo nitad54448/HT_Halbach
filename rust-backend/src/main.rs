@@ -6,7 +6,7 @@ fn install_shutdown(service: Arc<Service>) -> Result<(), String> {
     unsafe extern "system" fn handler(event: u32) -> i32 {
         if [0, 1, 2, 5, 6].contains(&event) {
             if let Some(s) = SERVICE.get() {
-                s.stop();
+                s.request_shutdown();
             }
             1
         } else {
@@ -23,6 +23,10 @@ fn install_shutdown(service: Arc<Service>) -> Result<(), String> {
     SERVICE
         .set(service)
         .map_err(|_| "Shutdown handler already installed")?;
+    // PowerShell or another parent may have passed down the ignore-Ctrl+C flag.
+    if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
+        return Err("Cannot restore console Ctrl+C processing".into());
+    }
     if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
         return Err("Cannot install console shutdown handler".into());
     }
@@ -99,7 +103,7 @@ fn run() -> Result<(), String> {
     let actual = server.server_addr().to_ip().ok_or("No TCP address")?.port();
     let service = Service::new(actual, origins, token, output, ui);
     install_shutdown(service.clone())?;
-    println!("Physical properties workstation: http://127.0.0.1:{actual}\nLocal sessions connect automatically; no token entry is needed.\nRemote pages support project inspection and analysis only.\nNo instruments are accessed until requested.");
+    println!("Physical properties workstation: http://127.0.0.1:{actual}\nLocal sessions connect automatically; no token entry is needed.\nRemote pages support project inspection and analysis only.\nNo instruments are accessed until requested.\nStop with Ctrl+C / Ctrl+Break or run stop-workstation.bat. If text is selected, press Esc first.");
     service.serve(server)
 }
 fn main() {

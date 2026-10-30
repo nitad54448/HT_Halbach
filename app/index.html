@@ -3,64 +3,44 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Halbach · Physical Properties Workstation</title>
+<script src="js/theme.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <div class="brand"><strong>HALBACH <span>Physical Properties</span></strong><small id="project-context">Untitled project · 0 runs</small></div>
-  <div class="actions"><span class="badge" id="b-mode">Connecting…</span><span class="badge" id="b-ls">Temp: OFF</span><span class="badge" id="b-run">Idle</span></div>
+  <div class="actions header-actions"><div class="actions header-status"><span class="badge" id="b-mode">Connecting…</span><span class="badge" id="b-ls">Temp: OFF</span><span class="badge" id="b-run">Idle</span></div><label class="theme-control"><input type="checkbox" role="switch" data-theme-switch aria-label="Dark mode"><span class="theme-track" aria-hidden="true"></span><span>Dark mode</span></label><a class="secondary header-help" href="help.html" id="help-link" target="_blank" rel="noopener" aria-label="Help and documentation (opens in a new tab)">Help</a></div>
 </header>
 
 <nav class="tabs" id="tabs" role="tablist"></nav>
 <main>
 <div class="workspace-banner">
   <div><span class="eyebrow">Measurement & materials analysis</span><h1 id="access-title">Connecting to the local workstation…</h1><p id="access-description" class="muted"></p><small id="access-status" role="status" aria-live="polite"></small></div>
-  <div class="actions"><button class="primary" id="open-project">Open project</button><button class="secondary" id="workstation-reconnect" hidden>Reconnect local service</button></div>
-</div>
-
-<div class="card actual-panel" id="actual-values-panel">
-  <div class="actual-header">
-    <strong>Live instrument readings</strong>
-    <div class="actions">
-      <span class="actual-badge" id="act-temp-badge">Temp: —</span>
-      <button type="button" class="secondary" id="btn-refresh-actual" style="min-height:30px;padding:3px 10px;font-size:12px">Poll readings</button>
-      <button type="button" class="secondary" id="btn-quick-zero" style="min-height:30px;padding:3px 10px;font-size:12px">Set angle as 0°</button>
-    </div>
-  </div>
-  <div class="kpis actual-kpis">
-    <div class="kpi"><span>Temperature</span><b id="act-temp">— K</b><small id="act-temp-status" class="muted">Status: idle</small></div>
-    <div class="kpi"><span>Timestamp / Elapsed</span><b id="act-time">—</b><small id="act-clock" class="muted">—</small></div>
-    <div class="kpi"><span>Excitation current</span><b id="act-current">— mA</b><small id="act-output-badge" class="badge">OUTPUT OFF</small></div>
-    <div class="kpi"><span>Measured voltage</span><b id="act-voltage">— V</b><small id="act-voltage-sub" class="muted">X: — | Y: —</small></div>
-    <div class="kpi"><span>Magnet angle</span><b id="act-angle">—°</b><small id="act-counter" class="muted">Counter: — incs</small></div>
-  </div>
+  <div class="workspace-actions"><div class="actions service-controls" id="workstation-controls"><div class="field"><label for="rust-url">Local service address</label><input id="rust-url" type="url" value="http://127.0.0.1:8765" spellcheck="false"></div><button class="secondary" id="workstation-reconnect" hidden>Reconnect local service</button><button type="button" class="help-tip" aria-label="Local service help" aria-describedby="workstation-help">?<span role="tooltip" id="workstation-help">Start start-workstation.bat on the measurement PC. The local browser connects automatically. Pages opened remotely provide project inspection and analysis.</span></button></div><button class="primary" id="open-project">Open project</button></div>
 </div>
 
 <section class="page active" id="p-mode" data-title="Mode">
   <p class="intro">Choose the method first: DC field with steps or scans, AC field with DC or AC current (sideband detection), or CHIRP. You can also load a preset method defined in JSON. Select compatible devices on the next tab.</p>
-  <div class="grid method-choices" id="mode-cards"></div>
+  <div class="grid method-choices" id="mode-cards">
+    <div class="method-options" id="principle-fixed" role="region" aria-labelledby="method-fixed" hidden><div class="grid g2">
+      <div class="field"><label for="x-fixed">Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
+      <div class="field"><label for="x-fixed-acquisition">Angular acquisition</label><select id="x-fixed-acquisition" data-bind="method.fixed.acq"><option value="step">Steps</option><option value="scan">Scans</option></select></div>
+    </div></div>
+    <div class="method-options" id="principle-rotating" role="region" aria-labelledby="method-rotating" hidden><div class="field"><label for="x-rotating">Excitation</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select><small>DC current: field-frequency detection. AC current: sideband detection.</small></div></div>
+    <div class="method-options" id="principle-chirp" role="region" aria-labelledby="method-chirp" hidden><p>AC excitation is fixed for CHIRP. Set current levels, rotation and cycles in Experiment setup.</p></div>
+  </div>
   <input id="preset-file" type="file" accept=".json,application/json" hidden>
   <div id="mode-msg" style="margin-top:16px"></div>
   <div id="method-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
-  <div class="card" id="principle-fixed" hidden><h2>DC field</h2><div class="grid g2">
-    <div class="field"><label>Excitation</label><select id="x-fixed" data-bind="method.fixed.excitation" data-excsel></select></div>
-    <div class="field"><label>Angular acquisition</label><select data-bind="method.fixed.acq"><option value="step">Steps</option><option value="scan">Scans</option></select></div>
-  </div></div>
-  <div class="card" id="principle-rotating" hidden><h2>AC field</h2><div class="field"><label>Excitation</label><select id="x-rotating" data-bind="method.rotating.excitation" data-excsel></select></div><p>DC current uses field-frequency detection. AC current uses sideband detection.</p></div>
-  <div class="card" id="principle-chirp" hidden><h2>CHIRP</h2><p>AC current with interleaved amplitudes and continuous field rotation.</p></div>
 </section>
 
 <section class="page" id="p-hardware" data-title="Hardware">
-  <h1>Devices and connections</h1><div id="device-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
+  <details class="device-accordion" id="device-configuration" open><summary>Devices and connections</summary><div class="accordion-content"><div id="device-lock" class="notice" role="status"></div><button class="secondary" data-release-config>Stop setup and edit configuration</button>
   <div class="card"><div class="grid g3">
     <div class="field"><label>Backend</label><select data-bind="hardware.backend"><option value="real">Real instruments</option><option value="simulation">Simulation (synthetic data)</option></select></div>
     <div class="field"><label>Temperature</label><select data-bind="hardware.temperature"><option value="off">OFF</option><option value="read">Read only</option><option value="control">Read and control</option></select></div>
   </div><p>Select the devices for your method, then check every connection before continuing to Sample. Simulation checks do not verify physical equipment.</p>
   </div>
-  <div class="card" id="rust-settings"><h2>Local workstation service</h2><div class="toolbar">
-    <div class="field"><label for="rust-url">Service URL</label><input id="rust-url" type="url" value="http://127.0.0.1:8765"></div>
-    <button class="secondary" id="rust-reconnect">Reconnect</button>
-  </div><p class="muted">Start start-workstation.bat on the measurement PC. The local browser connects automatically. Pages opened remotely provide project inspection and analysis.</p><div id="rust-settings-status" role="status"></div></div>
   <p class="intro">Choose instruments compatible with the selected method. Position comes from the OWIS controller (absolute angle) or an optical encoder through NI 9361 / cDAQ-9183 (relative angle). If the external reader is unavailable, CHECK connections checks the OWIS angle instead.</p>
   <div class="subtabs" role="tablist" id="hw-subtabs">
     <button data-sub="temp" class="active">Temperature control</button><button data-sub="magnet">Magnet</button><button data-sub="source">Current source</button><button data-sub="measure">Measure</button>
@@ -72,10 +52,11 @@
       <div class="field"><label for="f-loop">Control loop / heater output</label><select id="f-loop" data-bind="hardware.tempController.loop" data-num><option value="1">1</option><option value="2">2</option></select></div>
       <div class="field"><label for="f-maxk">Software max setpoint (K)</label><input id="f-maxk" type="number" data-bind="hardware.tempController.maxK" data-num><small>Protects the sample/cryostat. Programs above this are rejected.</small></div>
       <div class="field"><label for="f-maxr">Software max ramp (K/min)</label><input id="f-maxr" type="number" data-bind="hardware.tempController.maxRateKmin" data-num></div>
+      <div class="field"><label for="f-minr">Minimum supported ramp (K/min)</label><input id="f-minr" type="number" min="0.001" step="0.001" data-bind="hardware.tempController.minRateKmin" data-num><small>Default 0.1. Model 335 firmware 1.4 or newer supports 0.001; use the limit verified for this controller.</small></div>
     </div>
     <div class="actions" style="margin-top:14px"><button class="primary" id="ls-connect">Connect</button><button class="secondary" id="ls-disconnect" disabled>Disconnect</button><button class="danger" id="ls-heateroff" disabled>Heater off</button></div>
     <div id="ls-info" class="muted" style="margin-top:10px"></div>
-    <div class="card" style="margin-top:14px;background:#0d1721">
+    <div class="card" style="margin-top:14px;background:var(--panel2)">
       <h3>Live temperature status</h3>
       <div id="hw-temp-status" class="notice">Temperature controller idle or off.</div>
     </div>
@@ -94,10 +75,10 @@
       <div class="field"><label>cDAQ-9183 Ethernet host / IP</label><input data-bind="hardware.magnet.host" placeholder="192.168.1.100"></div>
       <div class="field"><label>Module / channel</label><input data-bind="hardware.magnet.encoder_addr" placeholder="e.g. cDAQ1Mod2/ctr0"></div>
       <div class="field"><label>Optical encoder pulses per revolution (before ×4 decoding)</label><input type="number" min="1" data-bind="hardware.magnet.encoder_ppr" data-num data-nullable></div>
-      <div class="field"><label>Field-angle zero offset (deg)</label><input type="number" step="any" data-bind="hardware.magnet.angle_offset_deg" data-num><small>Encoder zero to +X field direction, from calibration.</small></div>
-      <div class="field"><label>Position direction</label><select data-bind="hardware.magnet.dir_sign" data-num><option value="1">+1 (position angle = field angle)</option><option value="-1">−1 (reversed)</option></select></div>
+      <div class="field"><label for="positive-field-angle">+B angle (deg)</label><input id="positive-field-angle" type="number" step="any"><small>Stage angle where the field points along +B. Set 0 if stage 0° already corresponds to +B; the opposite field is 180° away.</small></div>
+      <div class="field"><label>Field-angle convention</label><select data-bind="hardware.magnet.dir_sign" data-num><option value="1">Angle increases with the stage angle</option><option value="-1">Angle increases opposite to the stage angle</option></select><small>Controls the angular sign, independently of the +B reference.</small></div>
       <div class="field"><label>Calibrated field magnitude B (T)</label><input type="number" min="0" step="any" data-bind="sample.B_T" data-num><small>At the sample position.</small></div>
-      <div class="field" style="grid-column: span 3"><div class="actions"><button type="button" class="secondary" id="btn-set-zero-pos">Set current position as 0°</button><span id="zero-pos-status" class="muted"></span></div></div>
+      <div class="field" style="grid-column: span 3"><div class="actions"><button type="button" class="secondary" id="btn-set-zero-pos">Use current position as +B</button><span id="zero-pos-status" class="muted"></span></div><small>Use only when the magnet is physically aligned with +B. This records a reference and does not move the magnet.</small></div>
     </div></div>
   <div class="card subpane" data-pane="source"><h2>Current source</h2><div class="grid g3">
       <div class="field"><label>Instrument</label><select data-bind="hardware.source.model" data-opts="SOURCES"></select></div>
@@ -118,6 +99,24 @@
   <div class="card"><h2>Declared instruments</h2><div id="hw-summary"></div></div>
   <div class="card"><button class="primary" id="check-connections" disabled>CHECK connections</button><p id="check-requirements"></p><div id="connection-results" role="status" aria-live="polite"></div></div>
   <div class="actions"><button class="secondary" id="save-preset">Save method &amp; devices as JSON</button><span id="preset-save-status" role="status"></span></div>
+  </div></details>
+  <div id="hardware-readings"><div class="card actual-panel" id="actual-values-panel">
+  <div class="actual-header">
+    <strong>Live instrument readings</strong>
+    <div class="actions">
+      <span class="actual-badge" id="act-temp-badge">Temp: —</span>
+      <button type="button" class="secondary" id="btn-refresh-actual" style="min-height:30px;padding:3px 10px;font-size:12px">Poll readings</button>
+      <button type="button" class="secondary" id="btn-quick-zero" style="min-height:30px;padding:3px 10px;font-size:12px">Use position as +B</button>
+    </div>
+  </div>
+  <div class="kpis actual-kpis">
+    <div class="kpi"><span>Temperature</span><b id="act-temp">— K</b><small id="act-temp-status" class="muted">Status: idle</small></div>
+    <div class="kpi"><span>Timestamp / Elapsed</span><b id="act-time">—</b><small id="act-clock" class="muted">—</small></div>
+    <div class="kpi"><span>Excitation current</span><b id="act-current">— mA</b><small id="act-output-badge" class="badge">OUTPUT OFF</small></div>
+    <div class="kpi"><span>Measured voltage</span><b id="act-voltage">— V</b><small id="act-voltage-sub" class="muted">X: — | Y: —</small></div>
+    <div class="kpi"><span>Magnet angle</span><b id="act-angle">—°</b><small id="act-counter" class="muted">Counter: — incs</small></div>
+  </div>
+</div></div>
 </section>
 
 <section class="page" id="p-sample" data-title="Sample">
@@ -134,7 +133,7 @@
 </section>
 
 <section class="page" id="p-temp" data-title="Temperature program">
-  <h1>Experiment setup</h1><p class="intro">Set measurement parameters here. During acquisition, apply changes for the next measurement; the current measurement keeps its original settings.</p><div class="actions"><button class="primary" id="apply-parameters">Apply parameters</button><span id="parameter-status" role="status"></span></div><div id="experiment-msg"></div><div class="card"><div class="grid g2"><div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div><div class="field"><label>TTL reference lock timeout (s)</label><input type="number" min="0.1" max="600" step="any" data-bind="method.lock_timeout_s" data-num><small>Timeout for locking to the external Ref In signal across lock-in modes.</small></div></div>
+  <h1>Experiment setup</h1><p class="intro">Configure the acquisition and temperature sequence. During a run, edit active parameters or add, remove and reorder future steps, then apply changes. Each acquisition retains its own recorded conditions.</p><div class="actions experiment-apply"><button class="primary" id="apply-parameters">Apply conditions & program</button><span id="parameter-status" role="status"></span></div><div id="experiment-msg"></div><div class="card"><h2>Detection settings</h2><div class="grid g2"><div class="field"><label>Lock-in time constant (ms)</label><input type="number" data-bind="method.tc_ms" data-num><small>Used by every lock-in mode.</small></div><div class="field"><label>TTL reference lock timeout (s)</label><input type="number" min="0.1" max="600" step="any" data-bind="method.lock_timeout_s" data-num><small>Timeout for locking to the external Ref In signal across lock-in modes.</small></div></div>
 </div>
   <div class="card mode-panel" id="mp-chirp" hidden><h2>CHIRP parameters</h2><div class="grid g3">
       <div class="field"><label>Carrier frequency (Hz)</label><input type="number" data-bind="method.carrier_hz" data-num><small>Guide range 500-900 Hz.</small></div>
@@ -163,32 +162,37 @@
       <div class="field"><label>Acquisition duration per current (s)</label><input type="number" data-bind="method.rotating.duration_s" data-num></div>
       <div class="field" data-when="ac"><label>Include zero-current background</label><select data-bind="method.rotating.background" data-bool><option value="true">Yes</option><option value="false">No</option></select></div>
   </div></div>
-<h2 id="prog-heading">Temperature program</h2>
+<h2 id="prog-heading">Temperature & acquisition program</h2>
   <div id="prog-temp-off-notice" class="notice ok" hidden>Temperature control is <strong>OFF</strong>. The experiment will execute at ambient room temperature without temperature ramps or stabilization delays.</div>
   <p class="intro" id="prog-intro">Build a temperature program from start, steps, and end temperatures (including multi-segment ramps and cooling). Temperature stability requires remaining continuously in-band for the minimum stabilization time, with time-averaged |ΔT| below the tolerance threshold and temperature standard deviation (ESD σ_T) below the ESD limit during the averaging window.</p>
-  <div class="card"><div class="toolbar">
-    <div class="field"><label>Add single step</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add step</button>
-    <div id="prog-sweep-group" style="display:inline-flex;gap:10px;align-items:end;flex-wrap:wrap">
-      <span style="width:24px"></span>
-      <div class="field"><label>Start T (K)</label><input id="sw0" type="number" value="300"></div>
-      <div class="field"><label>End T (K)</label><input id="sw1" type="number" value="320"></div>
-      <div class="field"><label>Step ΔT (K)</label><input id="swd" type="number" value="10"></div>
-      <div class="field"><label>Ramp rate (K/min)</label><input id="swr" type="number" value="5"></div>
-      <div class="field"><label for="sw-minstab">Min stabilization time (s)</label><input id="sw-minstab" type="number" min="1" value="60"></div>
-      <div class="field"><label for="sw-maxstab">Max stab. timeout (s)</label><input id="sw-maxstab" type="number" min="1" value="3600"></div>
-      <div class="field"><label for="sw-window">Averaging duration (s)</label><input id="sw-window" type="number" min="1" value="30"></div>
-      <div class="field"><label for="sw-tol">Max |ΔT| in window (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
-      <div class="field"><label for="sw-mean">Mean |ΔT| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
-      <div class="field"><label for="sw-esd">Max ESD σ_T (K)</label><input id="sw-esd" type="number" min="0" step="any" value="0.02"></div>
-      <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>
-      <button class="secondary" id="add-sweep">Append ramp + steps</button>
+  <div class="card"><h2 id="program-builder-title">Build a temperature segment</h2>
+    <div class="program-builder" id="prog-sweep-group">
+      <div class="grid g4">
+        <div class="field"><label for="sw-mode">Temperature mode</label><select id="sw-mode"><option value="steps">Stabilized steps</option><option value="scan">Slow scan · acquire while ramping</option></select></div>
+        <div class="field"><label for="sw0">Start temperature (K)</label><input id="sw0" type="number" value="300" step="any"></div>
+        <div class="field"><label for="sw1">End temperature (K)</label><input id="sw1" type="number" value="320" step="any"></div>
+        <div class="field" id="sw-step-field"><label for="swd">Temperature increment (K)</label><input id="swd" type="number" value="10" min="0" step="any"></div>
+        <div class="field"><label for="swr">Ramp rate (K/min)</label><input id="swr" type="number" min="0.001" step="0.001" value="0.1"></div>
+        <div class="field" id="sw-count-field"><label for="sw-count">Measurements at each T</label><input id="sw-count" type="number" min="1" max="10000" step="1" value="1"></div>
+        <div class="field"><label for="sw-interval">Wait between measurements (s)</label><input id="sw-interval" type="number" min="0" step="any" value="0"></div>
+        <div class="field"><label for="sw-range">Heater range</label><select id="sw-range"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div>
+      </div>
+      <details><summary>Stability criteria for temperature holds</summary><div class="grid g3" style="margin-top:12px">
+        <div class="field"><label for="sw-minstab">Minimum stable time (s)</label><input id="sw-minstab" type="number" min="1" value="60"></div>
+        <div class="field"><label for="sw-maxstab">Stabilization timeout (s)</label><input id="sw-maxstab" type="number" min="1" value="3600"></div>
+        <div class="field"><label for="sw-window">Averaging window (s)</label><input id="sw-window" type="number" min="1" value="30"></div>
+        <div class="field"><label for="sw-tol">Maximum |ΔT| (K)</label><input id="sw-tol" type="number" min="0" step="any" value="0.05"></div>
+        <div class="field"><label for="sw-mean">Mean |ΔT| limit (K)</label><input id="sw-mean" type="number" min="0" step="any" value="0.02"></div>
+        <div class="field"><label for="sw-esd">Temperature standard deviation (K)</label><input id="sw-esd" type="number" min="0" step="any" value="0.02"></div>
+      </div></details>
+      <div class="actions" style="margin-top:14px"><button class="secondary" id="add-sweep">Append temperature segment</button></div>
     </div>
-    <button class="secondary" id="clear-prog">Clear</button>
-  </div>
+    <p class="muted" id="sw-description">Stabilize each temperature, then repeat the measurement the requested number of times.</p>
+    <div class="toolbar"><div class="field"><label for="add-type">Add an individual operation</label><select id="add-type"></select></div><button class="secondary" id="add-step">Add operation</button><button class="secondary" id="clear-prog">Clear program</button></div>
   <div class="grid g2" style="margin-top:12px;margin-bottom:12px" id="prog-grid">
     <div class="tablewrap"><table id="prog-table"></table></div>
-    <div class="card" id="prog-preview-card" style="background:#0d1721;margin:0">
-      <h3>Planned temperature profile (T vs estimated time)</h3>
+    <div class="card" id="prog-preview-card" style="background:var(--panel2);margin:0">
+      <h3>Planned temperature profile</h3>
       <canvas id="c-prog-preview" style="height:240px"></canvas>
       <div id="prog-preview-stats" class="muted" style="margin-top:6px;font-size:12px"></div>
     </div>
@@ -205,9 +209,10 @@
     <div class="field" style="margin-left:18px"><label>Simulation speed</label><select id="r-speed"><option value="1">1× (real time)</option><option value="20">20×</option><option value="200">200×</option><option value="0" selected>Max</option></select></div>
   </div>
   <div class="progress" style="margin:16px 0 6px"><div id="r-prog"></div></div><div id="r-status" class="muted">Idle</div></div>
+  <div id="run-readings"></div>
   <div id="r-stability" class="muted" role="status"></div>
   <div class="kpis" id="r-kpis"></div>
-  <div class="grid g2" style="margin-top:16px"><div class="card"><h2>Temperature</h2><canvas id="c-temp"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>measured</span><span><i style="background:#e3b96e"></i>setpoint</span></div></div>
+  <div class="grid g2" style="margin-top:16px"><div class="card"><h2>Temperature</h2><canvas id="c-temp"></canvas><div class="legend"><span><i style="background:var(--plot-primary)"></i>measured</span><span><i style="background:var(--plot-secondary)"></i>setpoint</span></div></div>
   <div class="card"><h2>Program steps</h2><div class="tablewrap"><table id="run-steps"></table></div></div></div>
 </section>
 
@@ -220,8 +225,8 @@
   <div class="kpis" id="i-kpis"></div>
   <div class="card" id="i-slope-card" hidden><h2>Hall voltage versus DC current</h2><canvas id="c-current-slope"></canvas><p id="i-slope-info"></p></div>
   <div class="grid g2" style="margin-top:16px">
-    <div class="card"><h2>X vs field angle</h2><canvas id="c-xth"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>valid</span><span><i style="background:#566677"></i>masked</span><span><i style="background:#e3b96e"></i>fit</span></div></div>
-    <div class="card"><h2>X, Y vs time</h2><canvas id="c-xt"></canvas><div class="legend"><span><i style="background:#66d6ce"></i>X</span><span><i style="background:#80aaf9"></i>Y</span></div></div>
+    <div class="card"><h2>X vs field angle</h2><canvas id="c-xth"></canvas><div class="legend"><span><i style="background:var(--plot-primary)"></i>valid</span><span><i style="background:var(--plot-muted)"></i>masked</span><span><i style="background:var(--plot-secondary)"></i>fit</span></div></div>
+    <div class="card"><h2>X, Y vs time</h2><canvas id="c-xt"></canvas><div class="legend"><span><i style="background:var(--plot-primary)"></i>X</span><span><i style="background:var(--plot-tertiary)"></i>Y</span></div></div>
     <div class="card"><h2>Residuals vs angle</h2><canvas id="c-res"></canvas></div>
     <div class="card"><h2>Raw samples</h2><div class="toolbar"><div class="field"><label for="i-m0">Mask from t (s)</label><input id="i-m0" type="number" step="any"></div><div class="field"><label for="i-m1">to t (s)</label><input id="i-m1" type="number" step="any"></div><button class="secondary" id="i-mask">Exclude range</button><button class="secondary" id="i-unmask">Restore range</button></div><p id="i-mask-status" role="status"></p><p id="i-table-info" class="muted"></p><div class="tablewrap" style="max-height:240px"><table id="i-table"></table></div></div>
   </div>
@@ -234,7 +239,7 @@
   <div id="analysis-content" hidden>
   <div class="toolbar"><div class="field"><label for="a-filter">Data source</label><select id="a-filter"><option value="all">All runs</option><option value="measured">Measured only</option><option value="simulated">Simulated only</option></select></div><div class="field"><label for="a-axis">Plot against</label><select id="a-axis"><option value="auto">Automatic</option><option value="temperature">Temperature</option><option value="run">Run number</option></select></div><button class="secondary" id="a-refit">Recalculate all runs</button><button class="secondary" id="a-csv">Export visible results CSV</button></div>
   <div class="kpis" id="a-kpis"></div><p class="muted" id="a-notice" role="status"></p>
-  <div class="legend analysis-legend"><span><i style="background:#66d6ce"></i>Measured</span><span><i style="background:#e3b96e"></i>Simulated</span></div>
+  <div class="legend analysis-legend"><span><i style="background:var(--plot-primary)"></i>Measured</span><span><i style="background:var(--plot-secondary)"></i>Simulated</span></div>
   <div class="grid g2"><div class="card"><h2>Hall sheet density n<sub>s</sub></h2><canvas id="c-ns" role="img" aria-label="Hall sheet density plot"></canvas></div><div class="card"><h2>Hall mobility μ</h2><canvas id="c-mu" role="img" aria-label="Hall mobility plot"></canvas></div>
   <div class="card"><h2>Hall coefficient R<sub>H</sub></h2><canvas id="c-rh" role="img" aria-label="Hall coefficient plot"></canvas></div><div class="card"><h2>Sheet resistance R□</h2><canvas id="c-rs" role="img" aria-label="Sheet resistance plot"></canvas></div></div>
   <div class="card"><h2>Run analysis inputs</h2><p class="muted">Corrections apply to this run's analysis and are saved with the project. Original acquisition settings are preserved. Sheet resistance must be measured independently at the run temperature.</p><div class="grid g3">

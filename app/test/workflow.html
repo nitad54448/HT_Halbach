@@ -11,6 +11,9 @@ document.getElementById('app').addEventListener('load', async () => {
   try {
     while(w.HH.debugState().accessChecking)await new Promise(r=>setTimeout(r,10));
     assert(w.HH.debugState().accessMode==='workstation','Local service connects automatically');
+    assert(d.querySelector('#workstation-controls #rust-url')&&!d.querySelector('#p-hardware #rust-url, #rust-settings'),'Service address is next to top reconnect controls');
+    assert(d.getElementById('workstation-help').textContent==='Start start-workstation.bat on the measurement PC. The local browser connects automatically. Pages opened remotely provide project inspection and analysis.','Service help contains startup and remote analysis guidance');
+    assert(!d.getElementById('access-description').textContent.includes('Local service connected'),'Connected status is not duplicated in banner guidance');
     w.confirm=()=>true;
     const requests=[];
     w.HHHardware={checkDevice:async device=>{requests.push(device);return {ok:true,identity:device.model};}};
@@ -22,17 +25,43 @@ document.getElementById('app').addEventListener('load', async () => {
     assert(d.querySelector('[data-bind="method.lock_timeout_s"]').closest('#p-temp'),'TTL timeout is in Experiment setup');
     assert(!d.querySelector('#p-mode input[type="number"]'),'Method contains no numerical parameters');
     assert([...d.getElementById('x-fixed').options].map(o=>o.value).join(',')==='dc,ac','Excitation offers only DC and AC current');
+    d.getElementById('method-fixed').click();
+    assert(d.getElementById('principle-fixed').closest('[data-method="fixed"]')&&!d.getElementById('principle-fixed').hidden,'DC field options expand inside the selected method panel');
+    change(d.getElementById('x-fixed'),'dc');
+    assert(w.HH.debugState().P.method.fixed.excitation==='dc','Inline excitation controls retain their data binding');
+    d.getElementById('method-rotating').click();
+    assert(!d.getElementById('principle-rotating').hidden&&d.getElementById('principle-fixed').hidden,'Switching methods expands AC options and hides DC options');
     await preset('dc-delta');
+    change(d.querySelector('[data-bind="hardware.source.address"]'),'');
+    change(d.querySelector('[data-bind="hardware.source.model"]'),'K6220');
+    assert(w.HH.debugState().P.hardware.source.address==='GPIB0::6::INSTR','Keithley 6220 defaults to GPIB address 6');
+    change(d.querySelector('[data-bind="hardware.source.address"]'),'custom-source');
+    change(d.querySelector('[data-bind="hardware.source.model"]'),'K6221');
+    change(d.querySelector('[data-bind="hardware.source.model"]'),'K6220');
+    assert(w.HH.debugState().P.hardware.source.address==='custom-source','Model selection preserves a custom VISA address');
+    change(d.getElementById('positive-field-angle'),'30');
+    assert(w.HH.debugState().P.hardware.magnet.angle_offset_deg===-30,'+B reference maps to the existing saved offset');
+    change(d.querySelector('[data-bind="hardware.magnet.dir_sign"]'),'-1');
+    assert(w.HH.debugState().P.hardware.magnet.angle_offset_deg===30&&d.getElementById('positive-field-angle').value==='30','Reversing angle convention preserves the physical +B reference');
+    await preset('dc-delta');
+    assert([...d.querySelectorAll('#hw-subtabs button')].every(b=>!b.disabled),'Device section navigation is enabled after local connection');
+    for(const sub of ['magnet','source','measure']){d.querySelector('#hw-subtabs [data-sub="'+sub+'"]').click();assert(d.querySelector('[data-pane="'+sub+'"]').classList.contains('active'),'Devices opens '+sub+' section');}
+    for(const bind of ['hardware.magnet.rotator','hardware.source.model','hardware.measure.volt']){const select=d.querySelector('[data-bind="'+bind+'"]');assert(!select.disabled&&[...select.options].some(o=>o.value&&!o.disabled),'Instrument selection is editable: '+bind);}
     assert(w.HH.debugState().P.method.fixed.excitation==='dc'&&w.HH.debugState().P.hardware.measure.dc_mode==='delta','Legacy delta preset becomes DC excitation with delta device wiring');
     const reverse=d.querySelector('[data-bind="method.fixed.reverse"]');
     assert(reverse.closest('.field').hidden,'Delta hides manual reversal');
     d.getElementById('next').click();
+    assert(d.getElementById('device-configuration').tagName==='DETAILS'&&d.getElementById('actual-values-panel').parentElement.id==='hardware-readings','Device accordion precedes live instrument readings');
+    d.getElementById('device-configuration').open=false;
+    assert(!d.getElementById('actual-values-panel').hidden,'Collapsing device configuration leaves readings visible');
+    d.getElementById('device-configuration').open=true;
     assert(!d.getElementById('check-connections').disabled,'Configured addresses enable CHECK');
     assert(d.querySelector('[data-bind="hardware.measure.volt_addr"]').closest('.field').hidden,'Delta hides standalone voltmeter address');
     await d.getElementById('check-connections').onclick();
     assert(requests.some(r=>r.role==='voltmeter'&&r.parent==='source'),'Delta checks voltmeter through source');
     assert(!d.getElementById('next').disabled,'Successful checks unlock Sample');
     assert(d.getElementById('x-fixed').disabled&&d.querySelector('[data-bind="hardware.source.address"]').disabled,'Validated Method and Devices are read only');
+    d.querySelector('#hw-subtabs [data-sub="magnet"]').click();assert(d.querySelector('[data-pane="magnet"]').classList.contains('active')&&!d.querySelector('#hw-subtabs [data-sub="source"]').disabled,'Validated device sections remain navigable');
     change(d.querySelector('[data-bind="method.fixed.I_mA"]'),'2');
     assert(w.HH.debugState().connectionsOk(),'Parameter edits preserve device validation');
     let savedBlob;
@@ -72,6 +101,7 @@ document.getElementById('app').addEventListener('load', async () => {
     w.HHHardware.startProgram=async()=>({id:'browser-test-only'});
     w.HHHardware.programStatus=async()=>({state:'finished',step:0,count:1,message:'Fake transport program complete',temperatureK:null,setpointK:null,runs:[{samples:synthetic.samples,simulated:false,T_mean:null,T_set:null,positionSource:'owis',detectionKind:'angular'}]});
     d.getElementById('tabs').querySelector('[data-id="run"]').click();
+    assert(d.getElementById('actual-values-panel').parentElement.id==='run-readings'&&!d.getElementById('actual-values-panel').hidden,'Run displays live instrument readings beside the run controls');
     assert(!d.getElementById('r-start').disabled,'Calibrated real configuration enables Start');
     await d.getElementById('r-start').onclick();
     assert(p.runs.length===1&&!p.runs[0].simulated,'Real backend results retain their acquisition flag');
@@ -87,7 +117,7 @@ document.getElementById('app').addEventListener('load', async () => {
     while(!polls)await new Promise(r=>setTimeout(r,5));
     assert(d.getElementById('x-fixed').disabled,'Method locks during acquisition');
     d.querySelector('#tabs [data-id="temp"]').click();
-    assert(d.querySelector('[data-step-index="0"]').disabled&&!d.querySelector('[data-step-index="1"]').disabled,'Only future temperature step parameters remain editable');
+    assert(!d.querySelector('[data-step-index="0"]').disabled&&!d.querySelector('[data-step-index="1"]').disabled,'Active conditions and future step parameters remain editable');
     change(d.querySelector('[data-step-index="1"]'),'15');
     const current=d.querySelector('[data-bind="method.fixed.I_mA"]');
     assert(!current.disabled,'Experimental current stays editable during acquisition');

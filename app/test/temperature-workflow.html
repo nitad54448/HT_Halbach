@@ -1,0 +1,52 @@
+<!doctype html><meta charset="utf-8"><title>Temperature workflow regression tests</title>
+<pre id="results">RUNNING</pre><iframe id="app" src="../index.html" style="width:1440px;height:1000px"></iframe>
+<script>
+document.getElementById('app').addEventListener('load',async()=>{
+  const w=document.getElementById('app').contentWindow,d=w.document,results=[];
+  const assert=(v,message)=>{if(!v)throw Error(message);results.push(message);};
+  const change=(el,value)=>{el.value=value;el.dispatchEvent(new w.Event('change',{bubbles:true}));};
+  const wait=async fn=>{const deadline=Date.now()+12000;while(!fn()){if(Date.now()>deadline)throw Error('Timed out');await new Promise(r=>setTimeout(r,2));}};
+  try{
+    await wait(()=>w.HH?.debugState&&!w.HH.debugState().accessChecking);w.confirm=()=>true;
+    const p=w.HH.newTestProject();p.method.levels_mA=[1];p.method.rot_hz=1;p.method.cycles=1;p.method.direction='cw';p.method.mask_s=0.1;
+    await d.getElementById('pr-load').onchange({target:{files:[new w.File([JSON.stringify(p)],'temperature.hallproj.json')],value:''}});
+    d.querySelector('#tabs [data-id=hardware]').click();await d.getElementById('check-connections').onclick();
+    d.querySelector('#tabs [data-id=temp]').click();
+    assert(d.getElementById('p-temp').classList.contains('active'),'Experiment editor is available after simulated checks');
+    assert(['sw-mode','sw0','sw1','sw-count','swr','sw-range','sw-minstab'].every(id=>!d.getElementById(id).disabled),'Temperature builder inputs are enabled after automatic local connection');
+    assert(w.getComputedStyle(d.body).backgroundColor!=='rgb(11, 17, 25)'&&!d.querySelector('#mode-cards svg'),'Workstation uses the light interface and plain method rows');
+    d.getElementById('clear-prog').click();change(d.getElementById('sw0'),300);change(d.getElementById('sw1'),302);change(d.getElementById('swd'),1);change(d.getElementById('swr'),1);change(d.getElementById('sw-count'),3);
+    d.getElementById('add-sweep').click();let project=w.HH.debugState().P;
+    assert(project.tempProgram.length===6&&project.tempProgram.filter(s=>s.type==='measure').every(s=>s.repeats===3),'Step builder creates three measurements at each of three temperatures');
+    d.getElementById('clear-prog').click();change(d.getElementById('sw-mode'),'scan');change(d.getElementById('sw0'),295);change(d.getElementById('sw1'),295.5);
+    d.getElementById('add-sweep').click();
+    assert(project.tempProgram.length===2&&project.tempProgram[1].type==='scan','Slow scan builder stabilizes the start and acquires during the ramp');
+    assert(d.getElementById('sw-count-field').hidden&&d.getElementById('sw-step-field').hidden,'Slow scan hides discrete temperature/count fields');
+    project.tempProgram=[w.HH.makeStep('measure',{repeats:3})];
+    d.querySelector('#tabs [data-id=run]').click();await d.getElementById('r-start').onclick();
+    assert(project.runs.length===3&&project.runs.map(r=>r.measurement).join(',')==='1,2,3','Repeat count produces separate saved measurements');
+    project.tempProgram=[w.HH.makeStep('scan',{T:295.5,rate:1,endpoint_tol:0.005,timeout_s:120})];
+    change(d.getElementById('r-speed'),'200');
+    const initial=project.runs.length,run=d.getElementById('r-start').onclick();
+    await wait(()=>project.runs.length>initial);
+    d.querySelector('#tabs [data-id=temp]').click();
+    assert(!d.querySelector('[data-step-index="0"]').disabled,'Active temperature target remains editable');
+    assert(!d.getElementById('sw-mode').disabled&&!d.getElementById('add-type').disabled,'The program builder remains editable during acquisition');
+    change(d.querySelector('[data-step-index="0"]'),295.25);
+    change(d.querySelector('[data-bind="method.carrier_hz"]'),800);
+    change(d.getElementById('add-type'),'measure');d.getElementById('add-step').click();
+    change(d.querySelector('[data-step-index="1"]'),2);
+    assert(project.tempProgram.length===2,'Future steps can be appended during acquisition');
+    await d.getElementById('apply-parameters').onclick();
+    assert(d.getElementById('parameter-status').textContent.startsWith('Accepted'),'Live conditions and modified sequence are accepted');
+    await run;
+    const acquired=project.runs.slice(initial),scans=acquired.filter(r=>r.temperatureMode==='scan');
+    assert(scans.length>1&&scans.some(r=>r.temperatureStats.span>0.005),'Continuous acquisition records evolving measured temperatures');
+    assert(scans[0].method.carrier_hz===700&&scans.some(r=>r.method.carrier_hz===800),'New conditions preserve the active trace and apply to later measurements');
+    assert(acquired.filter(r=>r.temperatureMode==='step').length===2,'The appended repeated measurement step executes');
+    assert(scans.some(r=>r.programStep.T===295.25),'Updated scan target is stored with later acquisitions');
+    assert(!w.HH.debugState().running,'Program finishes after the updated scan and appended measurements');
+    document.getElementById('results').textContent='PASS '+results.length+' temperature workflow checks\n'+results.join('\n');
+  }catch(error){document.getElementById('results').textContent='FAIL '+error.stack;}
+});
+</script>

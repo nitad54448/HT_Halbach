@@ -197,6 +197,17 @@ fn cors_preflight_and_pairing_over_http() {
         "",
     );
     assert!(r.contains("403"));
-    service.stop();
+    for (origin, credential) in [
+        ("https://lab.github.io", Some(token)),
+        ("http://127.0.0.1:5501", None),
+    ] {
+        let r = request(port, "POST", "/api/shutdown", origin, credential, None, "{}");
+        assert!(r.contains("403"), "Remote or unauthenticated shutdown must be rejected");
+    }
+    let r = request(port, "GET", "/api/health", "http://127.0.0.1:5501", None, None, "");
+    assert!(r.contains("200"), "Rejected shutdown must leave the server running");
+    let r = request(port, "POST", "/api/shutdown", "http://127.0.0.1:5501", Some(token), None, "{}");
+    assert!(r.contains("200") && r.contains("\"ok\":true"), "Shutdown acknowledgement must arrive before the server exits");
     t.join().unwrap();
+    assert!(service.dispatch("/api/run", serde_json::json!({})).unwrap_err().contains("shutting down"));
 }

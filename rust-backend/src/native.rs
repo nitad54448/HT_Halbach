@@ -1,6 +1,83 @@
 use crate::protocol::{mfli_endpoint, AmetekTcp, Device, Hardware, Session, R};
 use serde_json::Value;
 
+#[cfg(any(windows, test))]
+fn visa_result(code: i32, operation: &str) -> R<()> {
+    if code >= 0 {
+        return Ok(());
+    }
+    let detail = if code as u32 == 0xBFFF0015 {
+        "VI_ERROR_TMO: timeout expired"
+    } else {
+        "VISA operation failed"
+    };
+    Err(format!("{operation}: {detail} (0x{:08X})", code as u32))
+}
+
+// A trailing CR/LF from the preceding exchange can be delivered as its own frame.
+// Read the pending answer without issuing the command a second time.
+#[cfg(any(windows, test))]
+fn nonempty_reply(mut read: impl FnMut() -> R<String>) -> R<String> {
+    for _ in 0..3 {
+        let reply = read()?;
+        if !reply.trim().is_empty() {
+            return Ok(reply.trim().into());
+        }
+    }
+    Err("No identification/data received: three empty VISA reply frames".into())
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn timeout_diagnostics_distinguish_open_from_read() {
+        let code = 0xBFFF0015u32 as i32;
+        let open = visa_result(code, "viOpen: source K6220 at 6220; exclusive lock, 2000 ms")
+            .unwrap_err();
+        let read = visa_result(
+            code,
+            "viRead: source K6220 at 6220; command *IDN?, timeout 2000 ms",
+        )
+        .unwrap_err();
+        assert!(open.contains("viOpen") && open.contains("exclusive lock"));
+        assert!(read.contains("viRead") && read.contains("*IDN?"));
+        assert!(open.contains("VI_ERROR_TMO") && read.contains("0xBFFF0015"));
+        assert!(visa_result(0, "success").is_ok());
+        assert!(visa_result(0x3FFF0006, "termination character received").is_ok());
+    }
+
+    #[test]
+    fn blank_line_frame_does_not_hide_following_identity() {
+        let mut frames = [
+            "\r\n",
+            "\n",
+            "KEITHLEY INSTRUMENTS INC.,MODEL 6220,1014670,A02 /700x\r\n",
+        ]
+        .into_iter();
+        let reply = nonempty_reply(|| Ok(frames.next().expect("read beyond reply").into()))
+            .unwrap();
+        assert!(crate::instruments::model_matches(&reply, "K6220"));
+    }
+
+    #[test]
+    fn empty_frames_are_bounded_and_io_errors_are_preserved() {
+        let mut reads = 0;
+        assert!(nonempty_reply(|| {
+            reads += 1;
+            Ok("\r\n".into())
+        })
+        .unwrap_err()
+        .contains("three empty"));
+        assert_eq!(reads, 3);
+        assert_eq!(
+            nonempty_reply(|| Err("VISA timeout".into())).unwrap_err(),
+            "VISA timeout"
+        );
+    }
+}
+
 #[derive(Default)]
 pub struct NativeHardware {
     #[cfg(windows)]
@@ -84,6 +161,7 @@ mod windows {
     type Open = unsafe extern "system" fn(u32, *const c_char, u32, u32, *mut u32) -> i32;
     type Close = unsafe extern "system" fn(u32) -> i32;
     type Attr = unsafe extern "system" fn(u32, u32, usize) -> i32;
+    type GetAttr = unsafe extern "system" fn(u32, u32, *mut c_void) -> i32;
     type Write = unsafe extern "system" fn(u32, *const u8, u32, *mut u32) -> i32;
     type Read = unsafe extern "system" fn(u32, *mut u8, u32, *mut u32) -> i32;
     #[link(name = "kernel32")]
@@ -129,22 +207,13 @@ mod windows {
     fn cstring(s: &str) -> R<CString> {
         CString::new(s).map_err(|_| "Embedded NUL".into())
     }
-    fn check(code: i32) -> R<()> {
-        if code < 0 {
-            Err(format!(
-                "VISA error 0x{:08X}; check address, power, interface and timeout",
-                code as u32
-            ))
-        } else {
-            Ok(())
-        }
-    }
     pub struct VisaApi {
         _lib: Library,
         rm: u32,
         open: Open,
         close: Close,
         attr: Attr,
+        get_attr: GetAttr,
         write: Write,
         read: Read,
     }
@@ -163,16 +232,18 @@ mod windows {
                 let open = symbol(&lib, b"viOpen\0")?;
                 let close = symbol(&lib, b"viClose\0")?;
                 let attr = symbol(&lib, b"viSetAttribute\0")?;
+                let get_attr = symbol(&lib, b"viGetAttribute\0")?;
                 let write = symbol(&lib, b"viWrite\0")?;
                 let read = symbol(&lib, b"viRead\0")?;
                 let mut rm = 0;
-                check(open_rm(&mut rm))?;
+                visa_result(open_rm(&mut rm), "viOpenDefaultRM")?;
                 Ok(Self {
                     _lib: lib,
                     rm,
                     open,
                     close,
                     attr,
+                    get_attr,
                     write,
                     read,
                 })
@@ -190,6 +261,8 @@ mod windows {
         api: Arc<VisaApi>,
         handle: u32,
         ending: u8,
+        label: String,
+        timeout_ms: usize,
     }
     impl VisaSession {
         pub fn open(api: Arc<VisaApi>, d: &Device) -> R<Self> {
@@ -205,23 +278,29 @@ mod windows {
             }
             let addr = cstring(&address)?;
             let mut handle = 0;
+            let label = format!("{} {} at {:?}", d.role, d.model, d.address);
             unsafe {
-                check((api.open)(api.rm, addr.as_ptr(), 1, 2000, &mut handle))?;
+                visa_result(
+                    (api.open)(api.rm, addr.as_ptr(), 1, 2000, &mut handle),
+                    &format!("viOpen {label} (exclusive lock, 2000 ms). Close other VISA test panels/sessions before retrying"),
+                )?;
             }
-            let s = Self {
+            let timeout_ms = if ["K2182", "K2182A"].contains(&d.model.as_str()) {
+                5000
+            } else {
+                2000
+            };
+            let mut s = Self {
                 api,
                 handle,
                 ending: if d.model == "OWISPS10" { 13 } else { 10 },
+                label,
+                timeout_ms,
             };
-            s.attr(
-                0x3FFF001A,
-                if ["K2182", "K2182A"].contains(&d.model.as_str()) {
-                    5000
-                } else {
-                    2000
-                },
-            )?;
-            if address.to_uppercase().starts_with("ASRL") {
+            s.attr(0x3FFF001A, timeout_ms)?;
+            // Query the opened resource: a VISA alias need not spell out its bus.
+            let interface = s.interface_type()?;
+            if interface == 4 { // VI_INTF_ASRL
                 let baud = d.baud.unwrap_or(9600);
                 if ![9600, 19200, 38400, 57600, 115200].contains(&baud) {
                     return Err("Unsupported baud rate".into());
@@ -237,11 +316,34 @@ mod windows {
                 }
             }
             s.attr(0x3FFF0018, s.ending as usize)?;
-            s.attr(0x3FFF0038, 1)?;
+            if [1, 3].contains(&interface) { // GPIB / GPIB-VXI
+                // GPIB messages finish on EOI. An early LF match can leave the
+                // end indication / trailing data for the next exchange.
+                s.attr(0x3FFF0016, 1)?; // VI_ATTR_SEND_END_EN
+                s.attr(0x3FFF0038, 0)?; // VI_ATTR_TERMCHAR_EN
+                s.label.push_str(" [GPIB EOI termination]");
+            } else {
+                s.attr(0x3FFF0038, 1)?;
+            }
             Ok(s)
         }
+        fn interface_type(&self) -> R<u16> {
+            let mut interface = 0u16;
+            unsafe {
+                visa_result(
+                    (self.api.get_attr)(self.handle, 0x3FFF0171, (&mut interface as *mut u16).cast()),
+                    &format!("viGetAttribute VI_ATTR_INTF_TYPE: {}", self.label),
+                )?;
+            }
+            Ok(interface)
+        }
         fn attr(&self, a: u32, v: usize) -> R<()> {
-            unsafe { check((self.api.attr)(self.handle, a, v)) }
+            unsafe {
+                visa_result(
+                    (self.api.attr)(self.handle, a, v),
+                    &format!("viSetAttribute {a:#010X}={v}: {}", self.label),
+                )
+            }
         }
     }
     impl Session for VisaSession {
@@ -253,12 +355,13 @@ mod windows {
             b.push(self.ending);
             let mut n = 0;
             unsafe {
-                check((self.api.write)(
-                    self.handle,
-                    b.as_ptr(),
-                    b.len() as u32,
-                    &mut n,
-                ))?;
+                visa_result(
+                    (self.api.write)(self.handle, b.as_ptr(), b.len() as u32, &mut n),
+                    &format!(
+                        "viWrite {}: command {c:?}, timeout {} ms",
+                        self.label, self.timeout_ms
+                    ),
+                )?;
             }
             if n as usize != b.len() {
                 return Err("Incomplete VISA write".into());
@@ -267,23 +370,109 @@ mod windows {
         }
         fn query(&mut self, c: &str) -> R<String> {
             self.write(c)?;
-            let mut b = [0u8; 4096];
-            let mut n = 0;
-            unsafe {
-                check((self.api.read)(self.handle, b.as_mut_ptr(), 4096, &mut n))?;
-            }
-            if n == 0 || n >= 4096 {
-                return Err("Empty or oversized VISA reply".into());
-            }
-            String::from_utf8(b[..n as usize].to_vec())
-                .map(|s| s.trim().into())
-                .map_err(|e| e.to_string())
+            nonempty_reply(|| {
+                let mut b = [0u8; 4096];
+                let mut n = 0;
+                unsafe {
+                    let code = (self.api.read)(self.handle, b.as_mut_ptr(), 4096, &mut n);
+                    if code < 0 {
+                        let partial = String::from_utf8_lossy(&b[..(n as usize).min(b.len())]);
+                        visa_result(code, &format!("viRead {}: command {c:?}, timeout {} ms, {n} bytes received, partial reply {partial:?}", self.label, self.timeout_ms))?;
+                    }
+                }
+                if n >= 4096 {
+                    return Err("Oversized VISA reply".into());
+                }
+                String::from_utf8(b[..n as usize].to_vec()).map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("VISA query {c:?}: {e}"))
         }
     }
     impl Drop for VisaSession {
         fn drop(&mut self) {
             unsafe {
                 (self.api.close)(self.handle);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod visa_tests {
+        use super::*;
+        use std::{cell::RefCell, collections::BTreeMap};
+
+        #[derive(Default)]
+        struct Driver {
+            interface: u16,
+            attrs: BTreeMap<u32, usize>,
+            writes: Vec<Vec<u8>>,
+            read_code: i32,
+        }
+        thread_local! { static DRIVER: RefCell<Driver> = RefCell::new(Driver::default()); }
+        unsafe extern "system" fn open(_: u32, _: *const c_char, _: u32, _: u32, handle: *mut u32) -> i32 { *handle = 2; 0 }
+        unsafe extern "system" fn close(_: u32) -> i32 { 0 }
+        unsafe extern "system" fn attr(_: u32, key: u32, value: usize) -> i32 {
+            DRIVER.with(|d| { d.borrow_mut().attrs.insert(key, value); }); 0
+        }
+        unsafe extern "system" fn get_attr(_: u32, key: u32, value: *mut c_void) -> i32 {
+            if key != 0x3FFF0171 { return -1; }
+            *value.cast::<u16>() = DRIVER.with(|d| d.borrow().interface); 0
+        }
+        unsafe extern "system" fn write(_: u32, bytes: *const u8, count: u32, written: *mut u32) -> i32 {
+            DRIVER.with(|d| d.borrow_mut().writes.push(std::slice::from_raw_parts(bytes, count as usize).to_vec()));
+            *written = count; 0
+        }
+        unsafe extern "system" fn read(_: u32, bytes: *mut u8, count: u32, received: *mut u32) -> i32 {
+            let reply = b"KEITHLEY INSTRUMENTS INC.,MODEL 6220,1014670,A02 /700x ";
+            let n = reply.len().min(count as usize);
+            std::ptr::copy_nonoverlapping(reply.as_ptr(), bytes, n);
+            *received = n as u32;
+            DRIVER.with(|d| d.borrow().read_code)
+        }
+        fn api(interface: u16, read_code: i32) -> Arc<VisaApi> {
+            DRIVER.with(|d| *d.borrow_mut() = Driver { interface, read_code, ..Default::default() });
+            Arc::new(VisaApi {
+                // Exercise the native session without loading NI drivers or accessing equipment.
+                _lib: unsafe { Library::new("kernel32.dll").unwrap() },
+                rm: 1, open, close, attr, get_attr, write, read,
+            })
+        }
+        #[test]
+        fn gpib_alias_and_full_address_use_eoi_and_preserve_identity() {
+            for address in ["6220", "GPIB0::6::INSTR"] {
+                let d = Device { role: "source".into(), model: "K6220".into(), address: address.into(), ..Default::default() };
+                let mut s = VisaSession::open(api(1, 0), &d).unwrap();
+                let id = s.query("*IDN?").unwrap();
+                assert!(crate::instruments::model_matches(&id, "K6220"));
+                DRIVER.with(|d| {
+                    let state = d.borrow();
+                    assert_eq!(state.attrs.get(&0x3FFF0016), Some(&1)); // SEND_END_EN
+                    assert_eq!(state.attrs.get(&0x3FFF0038), Some(&0)); // TERMCHAR_EN
+                    assert!(!state.attrs.contains_key(&0x3FFF0021)); // no serial baud on GPIB
+                    assert_eq!(state.writes, vec![b"*IDN?\n".to_vec()]);
+                });
+            }
+        }
+        #[test]
+        fn serial_alias_gets_serial_configuration_and_line_termination() {
+            let d = Device { role: "motion".into(), model: "OWISPS10".into(), address: "magnet".into(), baud: Some(19200), ..Default::default() };
+            let mut s = VisaSession::open(api(4, 0), &d).unwrap();
+            s.write("?VERSION").unwrap();
+            DRIVER.with(|d| {
+                let state = d.borrow();
+                assert_eq!(state.attrs.get(&0x3FFF0021), Some(&19200));
+                assert_eq!(state.attrs.get(&0x3FFF0018), Some(&13));
+                assert_eq!(state.attrs.get(&0x3FFF0038), Some(&1));
+                assert_eq!(state.writes, vec![b"?VERSION\r".to_vec()]);
+            });
+        }
+        #[test]
+        fn partial_timeout_remains_an_error_even_when_text_looks_complete() {
+            let d = Device { role: "source".into(), model: "K6220".into(), address: "GPIB0::6::INSTR".into(), ..Default::default() };
+            let mut s = VisaSession::open(api(1, 0xBFFF0015u32 as i32), &d).unwrap();
+            for command in ["*IDN?", "READ?"] {
+                let error = s.query(command).unwrap_err();
+                assert!(error.contains("VI_ERROR_TMO") && error.contains("MODEL 6220"));
             }
         }
     }

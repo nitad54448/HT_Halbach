@@ -49,7 +49,7 @@
       sample: { id: '', thickness_nm: 100, width_um: 100, length_um: 500, tilt_deg: 0, B_T: 1.0, rsq_ohm: null, notes: '' },
       hardware: {
         backend: 'real', temperature: 'off',
-        tempController: { model: 'LS335', address: 'GPIB0::12::INSTR', input: 'A', loop: 1, maxK: 400, maxRateKmin: 10 },
+        tempController: { model: 'LS335', address: 'GPIB0::12::INSTR', input: 'A', loop: 1, maxK: 400, maxRateKmin: 10, minRateKmin: 0.1 },
         magnet: { rotator: 'OWISPS10', rotator_addr: 'COM4', baud: 9600, unit: 1, axis: 1, term: 'crlf', counts_per_turn: 50000, velocity_scale: 1, encoder: '', encoder_addr: '', angle_offset_deg: 0, dir_sign: 1 },
         source: { model: '', address: '', compliance_V: 10, max_mA: 10 },
         measure: { volt: '', volt_addr: '', dc_mode: 'independent', lockin1: '', lockin1_addr: '', lockin2: '', lockin2_addr: '' },
@@ -90,6 +90,9 @@
 
   // Validate and normalize a copy before replacing the open project. Historical
   // runs keep their own geometry and method; cached results are always refitted.
+  function normalizeSourceAddress(source) {
+    if (source.model === 'K6220' && ['', '6220'].includes(String(source.address || '').trim())) source.address = 'GPIB0::6::INSTR';
+  }
   function normalizeProject(input) {
     if (!input || input.format !== 'halbach-hall-project') throw new Error('Not a Halbach Hall project file.');
     if (input.version !== undefined && (!Number.isInteger(input.version) || input.version < 1 || input.version > 1)) throw new Error('Unsupported project version: ' + input.version);
@@ -103,6 +106,7 @@
     };
     const p = { ...base, ...o, sample: { ...base.sample, ...object(o.sample, 'Sample') }, method: mergeMethod(o.method, base.method), hardware: { ...base.hardware, ...object(o.hardware, 'Hardware') } };
     for (const k of ['tempController','magnet','source','measure']) p.hardware[k] = { ...base.hardware[k], ...object(o.hardware?.[k], 'Hardware ' + k) };
+    normalizeSourceAddress(p.hardware.source);
     if (!o.method?.kind) p.method.kind = 'chirp';
     if (p.method.fixed.excitation === 'delta') { p.method.fixed.excitation = 'dc'; p.hardware.measure.dc_mode = 'delta'; }
     if (!o.method?.cycles) p.method.cycles = Math.max(1, Math.ceil(p.method.dwell_s * p.method.rot_hz));
@@ -127,6 +131,8 @@
       samples.valid = samples.valid.map(Number);
       const method = mergeMethod(r.method, p.method);
       if (method.fixed.excitation === 'delta') method.fixed.excitation = 'dc';
+      for(const key of ['T_mean','T_set'])if(r[key]!==undefined&&r[key]!==null&&!Number.isFinite(r[key]))throw new Error('Run '+id+': '+key+' must be numeric or null.');
+      if(r.temperatureStats!==undefined){object(r.temperatureStats,'Temperature statistics');for(const key of ['mean','min','max','start','end','span'])if(r.temperatureStats[key]!==undefined&&r.temperatureStats[key]!==null&&!Number.isFinite(r.temperatureStats[key]))throw new Error('Run '+id+': invalid temperature statistics.');}
       if (r.simulated !== undefined && typeof r.simulated !== 'boolean') throw new Error('Run ' + id + ': simulated must be true or false.');
       if (r.analysisSample !== undefined) object(r.analysisSample, 'Analysis sample');
       return { ...r, id, simulated:r.simulated ?? (o.simulated !== false), sample: { ...p.sample, ...object(r.sample, 'Run sample') }, method, samples, excluded: Array.isArray(r.excluded) ? r.excluded : [], fit: null, derived: null, fitError: null };
@@ -135,6 +141,20 @@
     return p;
   }
 
-  const api = { LEVELS, bus, Logger, newProject, newTestProject, normalizeProject, hist };
+  function temperatureStats(t, T, valid) {
+    let integral=0, weight=0;
+    const values=[];
+    for(let i=0;i<T.length;i++) {
+      const usable=Number.isFinite(t[i]) && Number.isFinite(T[i]) && (!valid || !!valid[i]);
+      if(usable) values.push(T[i]);
+      if(i && usable && Number.isFinite(t[i-1]) && Number.isFinite(T[i-1]) && (!valid || !!valid[i-1]) && t[i]>t[i-1]) {
+        const dt=t[i]-t[i-1];integral+=(T[i]+T[i-1])*dt/2;weight+=dt;
+      }
+    }
+    if(!values.length)return {mean:null,min:null,max:null,start:null,end:null,span:null,method:'unavailable'};
+    let min=Infinity,max=-Infinity;for(const v of values){min=Math.min(min,v);max=Math.max(max,v);}
+    return {mean:weight?integral/weight:values.reduce((a,v)=>a+v,0)/values.length,min,max,start:values[0],end:values[values.length-1],span:max-min,method:weight?'time-weighted':'sample-mean'};
+  }
+  const api = { LEVELS, bus, Logger, newProject, newTestProject, normalizeProject, normalizeSourceAddress, temperatureStats, hist };
   if (typeof module !== 'undefined') module.exports = api; else root.HH = Object.assign(root.HH || {}, api);
 })(typeof window !== 'undefined' ? window : globalThis);
