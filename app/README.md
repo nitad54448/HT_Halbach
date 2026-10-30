@@ -1,6 +1,6 @@
 # Halbach Hall workstation (app/)
 
-Run `powershell -File rust-backend/start.ps1` from the repository root and open `app/index.html` using Live Server or GitHub Pages. Pair the Devices page with the local Rust service URL and terminal token. See [Rust backend setup](../rust-backend/README.md). Opening `index.html` directly also works for simulation and importing JSON presets; real hardware requires the local service.
+Double-click `start-workstation.bat` on the measurement PC. It serves the UI from the local Rust service and connects the browser automatically, without a token prompt. Live Server on allowed loopback origins also connects automatically. GitHub Pages, other remote origins, direct file access and computers without the local service provide project inspection and data analysis only. See [Rust backend setup](../rust-backend/README.md).
 
 Method opens with four cards: DC field, AC field, CHIRP and **Load preset**. Load preset opens a JSON file picker. On Devices, **Save method & devices as JSON** exports the current method and all device settings in the same preset format, excluding sample data and measurements. Loading replaces method/device settings, preserves sample/data, and invalidates connection checks. Examples are in `presets/`: `dc-delta.json`, `ac-dc.json`, and `chirp.json`; edit addresses for your bench. Numerical controls, including TTL timeout, now appear in Experiment setup.
 
@@ -16,7 +16,7 @@ CHECK connections sits below device configuration and is enabled only after the 
 
 `js/backend.js` implements `window.HHHardware` using the local service. Position requests include `positionSource` and `angleType`: `optical`/`relative` checks the DAQmx chassis, NI 9361 and channel; `owis`/`absolute` uses `?CNT1` through the COM controller. A delta voltmeter request has `parent: 'source'`: only the source interface is opened, then `SOUR:DELT:NVPR?` and serial-forwarded `*IDN?` verify the linked nanovoltmeter. This detects the serial link, not the Trigger Link timing. Connection checks have an eight-second frontend deadline per device and do not enable outputs or motion. The Devices page's TTL reference button polls SR830 Ref In up to the Method timeout (maximum 600 s); it does not start rotation. It configures external rising-edge TTL and requires repeated stable lock observations.
 
-Tests: `node test/run.js`, `node test/modes.js`, `node test/connections.js`.
+Tests: `node test/run.js`, `node test/modes.js`, `node test/connections.js`, `node test/analysis.js`, `node test/backend.js`. Browser regression tests: `node test/browser.js` against a test service on port 18865.
 Always-available tabs: History, Log (None/Normal/Verbose/Debug), Project & report (save/load JSON, CSV export, print report).
 
 ## Test mode
@@ -35,3 +35,13 @@ The app starts with a blank project and no connections. For a synthetic run, sel
 Set start/end temperature, a positive step size, ramp rate, heater range, instantaneous |ΔT| limit, mean |ΔT| limit, stability window and timeout, then append the program. Cooling sweeps are automatic when end < start. Only whole increments are generated (up to 1000 points). Each point waits for stability before acquiring data; the step table allows individual overrides.
 
 Here ΔT = measured temperature − target (K). Stability requires the ramp to finish and every reading to remain within the instantaneous limit for a full window. The time-weighted mean absolute error over that rolling window must also pass the mean limit. Any out-of-band reading resets the window. Mean absolute error prevents positive and negative errors cancelling. Existing project steps without a mean limit retain their previous instantaneous-only criterion. Run displays the current error, window mean and time in band.
+
+## Physical properties analysis
+
+Analysis is available without hardware. Open a saved project to recompute each complete run from its raw data and recorded sample/method snapshot. Malformed project structures are rejected before replacing the open project. Partial and fully masked runs retain raw samples and a fit error, with no derived results.
+
+The Analysis tab provides measured/simulated filters, automatic temperature/run-number axes, fit diagnostics, and per-run corrections for thickness (nm), field magnitude (T), tilt (degrees) and independently measured sheet resistance (ohm). Corrections are stored as `analysisSample`, preserving the original `sample` snapshot. Restore acquisition inputs to remove them. Save the project to retain corrections and masks.
+
+Results include signed Hall coefficient, positive sheet and bulk Hall density, Hall mobility and resistivity, with statistical uncertainties where estimable. Invalid/missing values remain blank in CSV and appear as a dash in the interface. Zero Hall slope does not produce infinite density or a carrier assignment. Current-sweep uncertainties propagate within-current fit noise even with only two current levels. Field-lock-in results use the RMS gain documented in `analysis.js` and require calibrated phase.
+
+The raw sample table is a preview of at most 300 samples; raw CSV exports every sample. Mask edits and analysis corrections are recorded in History. Results CSV uses full numeric precision and the selected data-source filter. Reports include the actual analysis inputs for each run, and plots retain runs without temperature by using run number automatically.

@@ -1,4 +1,4 @@
-use halbach_instruments::service::{valid_origin, Service};
+use halbach_instruments::service::{local_origin, valid_origin, Service};
 use std::{
     collections::HashSet,
     io::{Read, Write},
@@ -41,6 +41,18 @@ fn origin_and_token_policy() {
     assert!(!s.authorized(""));
     assert!(s.authorized("0123456789abcdef"));
     assert!(!valid_origin("https://lab.github.io/path"));
+    assert!(local_origin("http://127.0.0.1:5501"));
+    assert!(local_origin("http://localhost:8765"));
+    assert!(local_origin("http://[::1]:5500"));
+    for origin in [
+        "null",
+        "http://localhost.evil:5501",
+        "http://127.0.0.1.evil",
+        "https://lab.github.io",
+        "http://localhost:0",
+    ] {
+        assert!(!local_origin(origin));
+    }
 }
 #[test]
 fn cors_preflight_and_pairing_over_http() {
@@ -55,7 +67,7 @@ fn cors_preflight_and_pairing_over_http() {
         ]),
         token.into(),
         PathBuf::new(),
-        None,
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app")),
     );
     let worker = service.clone();
     let t = std::thread::spawn(move || worker.serve(server).unwrap());
@@ -112,7 +124,69 @@ fn cors_preflight_and_pairing_over_http() {
         None,
         "{\"project\":{}}",
     );
-    assert!(r.contains("400"));
+    assert!(
+        r.contains("403"),
+        "Even a valid token cannot enable hardware for a remote page"
+    );
+    let r = request(
+        port,
+        "GET",
+        "/api/session",
+        "https://lab.github.io",
+        Some(token),
+        None,
+        "",
+    );
+    assert!(r.contains("403") && !r.contains(token));
+    let r = request(
+        port,
+        "GET",
+        "/api/session",
+        "http://127.0.0.1:5501",
+        None,
+        None,
+        "",
+    );
+    assert!(r.contains("200") && r.contains(token) && r.contains("workstation"));
+    let r = request(
+        port,
+        "POST",
+        "/api/run",
+        "http://127.0.0.1:5501",
+        Some(token),
+        None,
+        "{\"project\":{}}",
+    );
+    assert!(
+        r.contains("400"),
+        "Local authenticated requests reach project validation"
+    );
+    let r = request(
+        port,
+        "POST",
+        "/api/run",
+        "http://127.0.0.1:5501",
+        None,
+        None,
+        "{\"project\":{}}",
+    );
+    assert!(
+        r.contains("403"),
+        "Local commands still require the automatic session credential"
+    );
+    let r = request(
+        port,
+        "GET",
+        "/index.html",
+        "http://127.0.0.1:5501",
+        None,
+        None,
+        "",
+    );
+    assert!(
+        r.contains("__HALBACH_SERVICE__") && !r.contains(token),
+        "HTML contains no credential"
+    );
     let r = request(
         port,
         "GET",

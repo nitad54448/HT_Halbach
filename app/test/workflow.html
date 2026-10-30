@@ -9,6 +9,8 @@ document.getElementById('app').addEventListener('load', async () => {
   const loadFile=async text=>{await d.getElementById('preset-file').onchange({target:{files:[new w.File([text],'test.preset.json',{type:'application/json'})],value:''}});};
   const preset=async name=>{d.querySelector('#p-hardware [data-release-config]').click();d.getElementById('tabs').querySelector('[data-id="mode"]').click();await loadFile(await (await w.fetch('presets/'+name+'.json')).text());};
   try {
+    while(w.HH.debugState().accessChecking)await new Promise(r=>setTimeout(r,10));
+    assert(w.HH.debugState().accessMode==='workstation','Local service connects automatically');
     w.confirm=()=>true;
     const requests=[];
     w.HHHardware={checkDevice:async device=>{requests.push(device);return {ok:true,identity:device.model};}};

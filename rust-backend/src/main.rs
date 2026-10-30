@@ -62,7 +62,7 @@ fn run() -> Result<(), String> {
             "--data-dir" => output = PathBuf::from(args.next().ok_or("Missing data directory")?),
             "--token" => token_override = Some(args.next().ok_or("Missing token")?),
             "--help" => {
-                println!("halbach-service [--port 8765] [--allow-origin https://account.github.io] [--data-dir PATH] [--ui-dir app]\nStart Live Server for app/index.html. Pair its Devices page with this local service token. NI-VISA/DAQmx must match the executable architecture.");
+                println!("halbach-service [--port 8765] [--allow-origin http://127.0.0.1:5502] [--data-dir PATH] [--ui-dir app]\nLocal workstation browsers connect automatically. Remote pages provide analysis only. NI-VISA/DAQmx must match the executable architecture.");
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {a}")),
@@ -99,7 +99,7 @@ fn run() -> Result<(), String> {
     let actual = server.server_addr().to_ip().ok_or("No TCP address")?.port();
     let service = Service::new(actual, origins, token, output, ui);
     install_shutdown(service.clone())?;
-    println!("Rust hardware service: http://127.0.0.1:{actual}\nPairing token: {}\nOpen the UI in Live Server or GitHub Pages. No instruments are accessed until requested.",service.token);
+    println!("Physical properties workstation: http://127.0.0.1:{actual}\nLocal sessions connect automatically; no token entry is needed.\nRemote pages support project inspection and analysis only.\nNo instruments are accessed until requested.");
     service.serve(server)
 }
 fn main() {

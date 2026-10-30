@@ -167,6 +167,8 @@ impl Service {
         let origin = header("Origin");
         let host = header("Host").unwrap_or_default();
         let token = header("X-Halbach-Token").unwrap_or_default();
+        let local_client = request.remote_addr().is_some_and(|a| a.ip().is_loopback())
+            && origin.as_deref().is_none_or(local_origin);
         let host_ok = [
             format!("127.0.0.1:{}", self.port),
             format!("localhost:{}", self.port),
@@ -186,6 +188,20 @@ impl Service {
             self.reply(request,200,json!({"ok":true,"backend":"rust","busy":self.busy(),"version":env!("CARGO_PKG_VERSION")}),origin.as_deref());
             return;
         }
+        // Only the measurement PC may obtain a session or access instruments.
+        if path.starts_with("/api/") && !local_client {
+            self.reply(request, 403, json!({"error":"Measurement controls are available only on the local workstation. Use this computer for project inspection and analysis."}), origin.as_deref());
+            return;
+        }
+        if method == "GET" && path == "/api/session" {
+            self.reply(
+                request,
+                200,
+                json!({"backend":"rust","mode":"workstation","token":self.token}),
+                origin.as_deref(),
+            );
+            return;
+        }
         if method == "GET" && !path.starts_with("/api/") {
             self.static_file(request, &path, origin.as_deref());
             return;
@@ -200,7 +216,12 @@ impl Service {
             return;
         }
         if !self.authorized(&token) {
-            self.reply(request,403,json!({"error":"Pairing token is missing or incorrect. Paste the local Rust service token on Devices."}),origin.as_deref());
+            self.reply(
+                request,
+                403,
+                json!({"error":"Local session expired. Reconnect to the workstation service."}),
+                origin.as_deref(),
+            );
             return;
         }
         let mut body = Vec::new();
@@ -274,14 +295,10 @@ impl Service {
                 _ => "application/octet-stream",
             };
             let mut content = std::fs::read(&file).map_err(|e| e.to_string())?;
-            // When serving the UI directly, inject the session token into index.html
-            // so the browser connects seamlessly without requiring manual token entry!
+            // Identify the serving service without embedding credentials in HTML.
             if relative == "index.html" || relative.ends_with(".html") {
                 if let Ok(html_str) = String::from_utf8(content.clone()) {
-                    let injection = format!(
-                        "<script>window.__HALBACH_EMBEDDED_TOKEN__ = \"{}\";</script>\n",
-                        self.token
-                    );
+                    let injection = "<script>window.__HALBACH_SERVICE__ = true;</script>\n";
                     let replaced = html_str.replace("<head>", &format!("<head>\n{}", injection));
                     content = replaced.into_bytes();
                 }
@@ -300,6 +317,22 @@ impl Service {
             Err(e) => self.reply(request, 404, json!({"error":e}), origin),
         }
     }
+}
+pub fn local_origin(origin: &str) -> bool {
+    if !valid_origin(origin) {
+        return false;
+    }
+    let authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .unwrap_or("");
+    ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| {
+        authority == *host
+            || authority.strip_prefix(host).is_some_and(|rest| {
+                rest.strip_prefix(':')
+                    .is_some_and(|port| port.parse::<u16>().is_ok_and(|p| p > 0))
+            })
+    })
 }
 pub fn valid_origin(o: &str) -> bool {
     let rest = o

@@ -382,23 +382,23 @@ canvas{width:100%;height:280px;background:var(--panel2);border:1px solid var(--l
   color: #a78bfa;
 }
 [hidden]{display:none!important}
-/* Splash & Auth Accordion */
-.auth-accordion{margin:10px 20px 14px;border:1px solid #283c4f;background:#0d1824;border-radius:8px;overflow:hidden;transition:all 0.25s ease}
-.auth-accordion-header{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;cursor:pointer;user-select:none;background:#111f2e}
-.auth-accordion-header:hover{background:#16273a}
-.auth-accordion-header strong{font-size:12px;color:var(--cyan);letter-spacing:0.02em;text-transform:uppercase;display:flex;align-items:center;gap:6px}
-.auth-accordion-toggle{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px}
-.auth-accordion-toggle .arrow{display:inline-block;transition:transform 0.2s ease}
-.auth-accordion.collapsed .auth-accordion-toggle .arrow{transform:rotate(-90deg)}
-.auth-accordion-body{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;border-top:1px solid #1c2c3d}
-.auth-accordion.collapsed .auth-accordion-body{display:none}
-.auth-pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2px 8px;border-radius:12px;background:#132a24;border:1px solid #254a3e;color:var(--green)}
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(5,9,14,0.85);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px}
-.modal-card{background:var(--panel);border:1px solid #354e66;box-shadow:0 12px 32px rgba(0,0,0,0.6);border-radius:12px;max-width:540px;width:100%;padding:24px}
-.modal-card h2{font-size:18px;margin:0 0 8px;color:var(--cyan);display:flex;align-items:center;gap:8px}
-.modal-card p{color:var(--muted);font-size:13px;margin:0 0 16px;line-height:1.5}
-.modal-card .actions{justify-content:flex-end;margin-top:20px}
-.modal-tip{background:#09141f;border:1px dashed #2a435c;border-radius:6px;padding:10px 14px;font-size:12px;color:#a8bdcf;margin-top:14px}
-.modal-tip code{color:var(--amber);background:#132231;padding:2px 6px;border-radius:4px}
 @media(max-width:1000px){.method-choices{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:600px){.method-choices{grid-template-columns:1fr}}
+
+/* Measurement workspace */
+.brand strong{display:block;font-size:15px;letter-spacing:.12em}.brand strong span{font-weight:450;letter-spacing:0;color:#c4d3df;margin-left:10px}.brand small{display:block;font-size:11px;margin-top:2px}
+header{height:auto;min-height:70px;gap:16px;padding:12px 28px;flex-wrap:wrap}
+nav.tabs{position:sticky;top:0;z-index:10;scrollbar-width:thin}nav.tabs button{min-height:48px}
+.workspace-banner{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:24px;padding-bottom:22px;border-bottom:1px solid var(--line)}
+.workspace-banner h1{font-size:26px;margin:6px 0}.workspace-banner p{max-width:80ch;margin:4px 0 8px}.workspace-banner small{color:var(--muted)}
+.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.14em;font-weight:650;color:var(--cyan)}
+.empty-state{padding:48px 28px;border-style:dashed;max-width:800px;margin-top:20px}.empty-state h2{font-size:21px;margin:10px 0}.empty-state p{max-width:65ch;color:var(--muted)}
+#a-kpis{margin:16px 0}.analysis-legend{margin:0 0 14px}#a-run-status{color:var(--muted);line-height:1.65}#a-run-status:empty,#i-mask-status:empty{display:none}
+.tablewrap th{position:sticky;top:0;background:#142130;z-index:1}.tablewrap td{font-variant-numeric:tabular-nums}.tablewrap tr:hover td{background:#162b39}
+#i-kpis{margin-bottom:16px}#a-table td:last-child{white-space:normal;min-width:260px;max-width:400px}#a-table td:nth-child(2){white-space:normal;min-width:140px}
+.mode-card{box-shadow:none;transition:border-color .15s,background .15s}.mode-card:hover{transform:none;box-shadow:none}.mode-card.sel{box-shadow:inset 0 0 0 1px currentColor}
+@media(max-width:900px){.workspace-banner{align-items:flex-start;flex-direction:column;gap:16px}.grid .field[style*="span 3"]{grid-column:auto!important}.brand strong span{display:block;margin:2px 0 0}header{padding:12px 16px}nav.tabs{padding:0 8px}.workspace-banner h1{font-size:23px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
+
+.analysis-mode nav.tabs .n{display:none}
+@media print{#report th,#report td{white-space:normal;overflow-wrap:anywhere}#report h2{margin-top:18px}#report img{max-height:270px}#report table{page-break-inside:auto}#report tr{page-break-inside:avoid}}

@@ -1,7 +1,9 @@
 param(
     [int]$Port = 8765,
     [string[]]$AllowOrigin = @(),
-    [switch]$ServeUi
+    [switch]$ServeUi,
+    [switch]$OpenBrowser,
+    [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
 $workspacePath = Split-Path -Parent $PSScriptRoot
@@ -23,12 +25,27 @@ if (-not $cargoCommand) {
     $cargoBinary = $cargoCommand.Source
 }
 $releaseBinary = Join-Path $PSScriptRoot 'target/release/halbach-service.exe'
-$newestSource = Get-ChildItem -Path (Join-Path $PSScriptRoot 'src'), (Join-Path $PSScriptRoot 'Cargo.toml') -Recurse -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$newestSource = Get-ChildItem -Path (Join-Path $PSScriptRoot 'src'), (Join-Path $PSScriptRoot 'Cargo.toml'), (Join-Path $PSScriptRoot 'Cargo.lock') -Recurse -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
 $needsBuild = -not (Test-Path -LiteralPath $releaseBinary) -or ($newestSource -and $newestSource.LastWriteTimeUtc -gt (Get-Item -LiteralPath $releaseBinary).LastWriteTimeUtc)
-if (-not $needsBuild) { & $releaseBinary @serviceArguments; exit $LASTEXITCODE }
-if (-not $cargoBinary -or -not (Test-Path -LiteralPath $cargoBinary)) {
-    if (Test-Path -LiteralPath $releaseBinary) { & $releaseBinary @serviceArguments; exit $LASTEXITCODE }
-    throw 'Install Rust with rustup, then run this launcher again.'
+if ($needsBuild) {
+    if (-not $cargoBinary -or -not (Test-Path -LiteralPath $cargoBinary)) { throw 'Sources have changed. Install Rust with rustup to build the current service; an outdated binary will not be started.' }
+    & $cargoBinary build --release --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw 'Service build failed. Stop any previous service before rebuilding, then run the launcher again.' }
 }
-& $cargoBinary run --release --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') -- @serviceArguments
-exit $LASTEXITCODE
+if ($BuildOnly) { exit 0 }
+$browserJob = $null
+if ($OpenBrowser) {
+    $browserJob = Start-Job -ArgumentList "http://127.0.0.1:$Port" -ScriptBlock {
+        param($serviceUrl)
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            try {
+                $health = Invoke-RestMethod -Uri "$serviceUrl/api/health" -TimeoutSec 1
+                if ($health.ok -and $health.backend -eq 'rust') { Start-Process $serviceUrl; return }
+            } catch {}
+            Start-Sleep -Seconds 1
+        }
+    }
+}
+try { & $releaseBinary @serviceArguments; $serviceExitCode = $LASTEXITCODE }
+finally { if ($browserJob) { Stop-Job $browserJob; Remove-Job $browserJob -Force } }
+exit $serviceExitCode

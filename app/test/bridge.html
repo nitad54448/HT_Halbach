@@ -1,21 +1,19 @@
-<!doctype html><meta charset="utf-8"><title>Rust bridge test</title>
+﻿<!doctype html><meta charset="utf-8"><title>Local Rust bridge test</title>
 <pre id="result">Running</pre><script src="../js/backend.js"></script><script>
 (async()=>{
- const output=document.querySelector('#result');
- try {
-  const token=new URLSearchParams(location.hash.slice(1)).get('token');
-  HHHardware.configure({baseUrl:'http://127.0.0.1:8766',token:''});
-  let missing=false;try{await HHHardware.checkDevice({});}catch(e){missing=/pairing token/.test(e.message);}
-  if(!missing)throw Error('Missing token accepted');
-  HHHardware.configure({baseUrl:'http://127.0.0.1:8766',token:'incorrect-test-token'});
-  let rejected=false;try{await HHHardware.checkDevice({});}catch(e){rejected=/token|pair/i.test(e.message);}
-  if(!rejected)throw Error('Wrong token accepted');
-  HHHardware.configure({baseUrl:'http://127.0.0.1:8766',token});
-  const response=await fetch('http://127.0.0.1:8766/api/health',{mode:'cors',targetAddressSpace:'loopback'});
-  if(!response.ok)throw Error('Health failed');
-  let validated=false;try{await HHHardware.checkDevice({role:'unknown',model:'unsupported',address:'none'});}catch(e){validated=/unsupported|unknown/i.test(e.message);}
-  if(!validated)throw Error('Native validation response missing');
-  output.textContent='PASS: cross-origin Rust connection, missing token, rejected token, authenticated validation';
- }catch(e){output.textContent='FAIL: '+e.message;}
+  const output=document.querySelector('#result');
+  try {
+    const serviceUrl=new URLSearchParams(location.search).get('url')||HHHardware.settings().baseUrl;
+    HHHardware.configure({baseUrl:serviceUrl});
+    let blocked=false;try{await HHHardware.checkDevice({});}catch(e){blocked=/local workstation/.test(e.message);}
+    if(!blocked)throw Error('Commands were accepted without a local session');
+    const session=await HHHardware.connect();
+    if(!session.ok)throw Error(session.error);
+    let validated=false;
+    try{await HHHardware.checkDevice({role:'unknown',model:'unsupported',address:'none'});}catch(e){validated=/unsupported|unknown/i.test(e.message);}
+    if(!validated)throw Error('Native validation response missing');
+    if('token' in HHHardware.settings())throw Error('Credential exposed in settings');
+    output.textContent='PASS: automatic local session, blocked unauthenticated commands, native validation, credential kept in memory';
+  }catch(e){output.textContent='FAIL: '+e.message;}
 })();
 </script>

@@ -22,9 +22,11 @@
     return isKeithleySource && isKeithleyVolt && (
       p.hardware.measure.dc_mode === 'delta' ||
       p.method.fixed?.excitation === 'delta' ||
-      !p.hardware.measure.volt_addr ||
-      p.hardware.measure.volt_addr.trim() === '' ||
-      p.hardware.measure.volt_addr.trim().toUpperCase() === (p.hardware.source.address || '').trim().toUpperCase()
+      (p.hardware.measure.dc_mode !== 'independent' && (
+        !p.hardware.measure.volt_addr ||
+        p.hardware.measure.volt_addr.trim() === '' ||
+        p.hardware.measure.volt_addr.trim().toUpperCase() === (p.hardware.source.address || '').trim().toUpperCase()
+      ))
     );
   };
   const usesVoltmeter = m => m.kind === 'fixed' && ['dc', 'delta'].includes(m.fixed.excitation);
@@ -91,7 +93,7 @@
       const f = m.fixed;
       if (usesVoltmeter(m) && (!Number.isInteger(f.nplc) || f.nplc<1 || f.nplc>50)) e.push('Nanovoltmeter integration must be 1..50 whole PLC.');
       if (!['step','scan'].includes(f.acq)) e.push('Select steps or scans.');
-      if (f.acq === 'step') { if (!Number.isInteger(f.n_angles) || !(f.n_angles >= 4)) e.push('Use at least 4 whole angles.'); if (!pos(f.settle_s)) e.push('Settling time must be > 0.'); }
+      if (f.acq === 'step') { if (!Number.isInteger(f.n_angles) || !(f.n_angles >= 6)) e.push('Use at least 6 whole angles to fit the angular harmonics.'); if (!pos(f.settle_s)) e.push('Settling time must be > 0.'); }
       else if (!pos(f.rot_hz)) e.push('Rotation frequency must be > 0.');
       if (f.excitation === 'ac' && !pos(f.carrier_hz)) e.push('Carrier frequency must be > 0.');
     } else {
@@ -114,8 +116,10 @@
   }
   function sampleErrors(p) {
     const s = p.sample, e = [];
-    if (!(s.thickness_nm > 0)) e.push('Thickness must be > 0.');
-    if (!(s.B_T > 0)) e.push('Field magnitude must be > 0 (Magnet tab).');
+    if (!Number.isFinite(s.thickness_nm) || !(s.thickness_nm > 0)) e.push('Thickness must be finite and > 0.');
+    if (!Number.isFinite(s.B_T) || !(s.B_T > 0)) e.push('Field magnitude must be finite and > 0 (Magnet tab).');
+    if (!Number.isFinite(s.tilt_deg)) e.push('Tilt must be a finite angle.');
+    if (s.rsq_ohm !== null && s.rsq_ohm !== undefined && (!Number.isFinite(s.rsq_ohm) || s.rsq_ohm <= 0)) e.push('Sheet resistance must be positive or left blank.');
     return e;
   }
   /** Approximate acquisition time in seconds for one temperature point. */

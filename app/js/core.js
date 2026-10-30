@@ -88,6 +88,53 @@
     bus.emit('history:add');
   }
 
-  const api = { LEVELS, bus, Logger, newProject, newTestProject, hist };
+  // Validate and normalize a copy before replacing the open project. Historical
+  // runs keep their own geometry and method; cached results are always refitted.
+  function normalizeProject(input) {
+    if (!input || input.format !== 'halbach-hall-project') throw new Error('Not a Halbach Hall project file.');
+    if (input.version !== undefined && (!Number.isInteger(input.version) || input.version < 1 || input.version > 1)) throw new Error('Unsupported project version: ' + input.version);
+    const o = JSON.parse(JSON.stringify(input)), base = newProject();
+    const object = (v, name) => { if (v !== undefined && (!v || typeof v !== 'object' || Array.isArray(v))) throw new Error(name + ' must be an object.'); return v || {}; };
+    const mergeMethod = (value, defaults) => {
+      const method = { ...defaults, ...object(value, 'Method') };
+      for (const k of ['fixed','rotating']) method[k] = { ...defaults[k], ...object(value?.[k], 'Method ' + k) };
+      if (!Array.isArray(method.levels_mA) || !Array.isArray(method.rotating.currents_mA)) throw new Error('Current levels must be arrays.');
+      return method;
+    };
+    const p = { ...base, ...o, sample: { ...base.sample, ...object(o.sample, 'Sample') }, method: mergeMethod(o.method, base.method), hardware: { ...base.hardware, ...object(o.hardware, 'Hardware') } };
+    for (const k of ['tempController','magnet','source','measure']) p.hardware[k] = { ...base.hardware[k], ...object(o.hardware?.[k], 'Hardware ' + k) };
+    if (!o.method?.kind) p.method.kind = 'chirp';
+    if (p.method.fixed.excitation === 'delta') { p.method.fixed.excitation = 'dc'; p.hardware.measure.dc_mode = 'delta'; }
+    if (!o.method?.cycles) p.method.cycles = Math.max(1, Math.ceil(p.method.dwell_s * p.method.rot_hz));
+    for (const k of ['runs','history','log','tempProgram']) if (!Array.isArray(p[k])) throw new Error(k + ' must be an array.');
+    if (p.tempProgram.some(s => !s || typeof s !== 'object' || typeof s.type !== 'string')) throw new Error('Invalid program step.');
+    if (p.history.some(h => !h || typeof h.t !== 'string' || typeof h.kind !== 'string' || typeof h.text !== 'string')) throw new Error('Invalid history entry.');
+    if (p.log.some(e => !e || !Number.isFinite(e.t) || typeof e.level !== 'string' || typeof e.src !== 'string' || typeof e.msg !== 'string')) throw new Error('Invalid log entry.');
+    const ids = new Set();
+    p.runs = p.runs.map((r, index) => {
+      object(r, 'Run');
+      const id = String(r.id || 'run-' + String(index+1).padStart(3,'0'));
+      if (ids.has(id)) throw new Error('Duplicate run ID: ' + id); ids.add(id);
+      const samples = object(r.samples, 'Run ' + id + ' samples'), n = samples.t?.length;
+      if (!Array.isArray(samples.t) || !samples.t.every(Number.isFinite)) throw new Error('Run ' + id + ': sample times must be finite numbers.');
+      for (const key of ['X','I','theta','Y','T','valid']) {
+        if (samples[key] === undefined && ['Y','T','valid'].includes(key)) samples[key] = new Array(n).fill(key === 'valid' ? 1 : null);
+        if (samples[key] === undefined && key === 'theta' && r.detectionKind === 'field-lockin') samples.theta = new Array(n).fill(null);
+        if (!Array.isArray(samples[key]) || samples[key].length !== n) throw new Error('Run ' + id + ': inconsistent ' + key + ' sample array.');
+        if (key !== 'valid' && samples[key].some(v => v !== null && !Number.isFinite(v))) throw new Error('Run ' + id + ': ' + key + ' contains nonnumeric samples.');
+      }
+      if (samples.valid.some(v => ![0,1,false,true].includes(v))) throw new Error('Run ' + id + ': invalid sample mask.');
+      samples.valid = samples.valid.map(Number);
+      const method = mergeMethod(r.method, p.method);
+      if (method.fixed.excitation === 'delta') method.fixed.excitation = 'dc';
+      if (r.simulated !== undefined && typeof r.simulated !== 'boolean') throw new Error('Run ' + id + ': simulated must be true or false.');
+      if (r.analysisSample !== undefined) object(r.analysisSample, 'Analysis sample');
+      return { ...r, id, simulated:r.simulated ?? (o.simulated !== false), sample: { ...p.sample, ...object(r.sample, 'Run sample') }, method, samples, excluded: Array.isArray(r.excluded) ? r.excluded : [], fit: null, derived: null, fitError: null };
+    });
+    p.simulated = p.runs.some(r => r.simulated === true);
+    return p;
+  }
+
+  const api = { LEVELS, bus, Logger, newProject, newTestProject, normalizeProject, hist };
   if (typeof module !== 'undefined') module.exports = api; else root.HH = Object.assign(root.HH || {}, api);
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -12,6 +12,8 @@
   }
 
   let P = newProject(), dirty = false;
+  const configurationSnapshot = () => JSON.parse(JSON.stringify({sample:P.sample,method:P.method,hardware:P.hardware,tempProgram:P.tempProgram}));
+  function nextRunId() { let n=P.runs.length+1;while(P.runs.some(r=>r.id==='run-'+String(n).padStart(3,'0')))n++;return 'run-'+String(n).padStart(3,'0'); }
   let connectionCheck = null, checking = false;
   const connectionKey = () => JSON.stringify([P.hardware, HH.principle(P.method)]);
   const connectionsOk = () => connectionCheck?.ok && connectionCheck.key === connectionKey();
@@ -23,6 +25,8 @@
   let ctrl = null, simDev = null, runner = null, running = false, vnow = 0;
   let trace = { t: [], T: [], sp: [] }, stepState = [], selRun = null;
   let hardwareAuthenticated = false;
+  let accessChecking = true;
+  const canMeasure = () => hardwareAuthenticated;
 
   /* ---------------- tabs ---------------- */
   const FLOW = [['mode', 'Method'], ['hardware', 'Devices'], ['sample', 'Sample'], ['temp', 'Experiment setup'], ['run', 'Run'], ['inspect', 'Data inspect'], ['analysis', 'Analysis']];
@@ -38,11 +42,9 @@
     }
   }
   function reachable(id) {
+    if (['inspect','analysis','project','history','log'].includes(id)) return true;
+    if (!canMeasure()) return false;
     if (id === 'mode') return true;
-    // When not connected to real hardware (e.g. GitHub Pages or offline), permit safe viewing & analysis tabs
-    if (P.hardware.backend === 'real' && !hardwareAuthenticated) {
-      return ['mode', 'hardware', 'inspect', 'analysis', 'project'].includes(id);
-    }
     if (running && ['run', 'temp', 'mode', 'hardware'].includes(id)) return true;
     if (UTIL.some(u => u[0] === id)) return true;
     if (P.runs.length && ['inspect', 'analysis'].includes(id)) return true;
@@ -62,11 +64,12 @@
     document.querySelectorAll('#tabs button').forEach(b => {
       const id = b.dataset.id, ok = reachable(id);
       b.disabled = !ok; b.classList.toggle('active', id === current);
+      b.hidden = !canMeasure() && ['mode','hardware','sample','temp','run'].includes(id);
       b.classList.toggle('done', FLOW.some(f => f[0] === id) && ok && id !== current && ['hardware', 'mode', 'sample', 'temp'].includes(id) && stepOk(id));
       b.setAttribute('aria-selected', id === current);
     });
     const i = FLOW.findIndex(f => f[0] === current), inFlow = i >= 0;
-    $('pager').style.display = inFlow ? 'flex' : 'none';
+    $('pager').style.display = inFlow && canMeasure() ? 'flex' : 'none';
     if (inFlow) { $('back').disabled = i === 0; $('next').disabled = i === FLOW.length - 1 || !reachable(FLOW[i + 1][0]); }
   }
   function show(id) {
@@ -75,6 +78,7 @@
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'p-' + id));
     Logger.verbose('UI', 'Tab ' + id);
     renderPage(id); refreshTabs(); window.scrollTo(0, 0);
+    setBadges();
   }
   function renderPage(id) {
     ({ mode: renderMode, sample: renderSample, temp: renderProgram, run: renderRun, inspect: renderInspect, analysis: renderAnalysis, history: renderHistory, log: renderLog, hardware: renderHardware })[id]?.();
@@ -98,10 +102,11 @@
     $('f-levels').value = P.method.levels_mA.join(', ');
     $('f-dc-currents').value = P.method.rotating.currents_mA.join(', ');
     const bridge=window.HHHardware.settings?.();
-    if(bridge){$('rust-url').value=bridge.baseUrl;$('rust-token').value=bridge.token;}
+    if(bridge) $('rust-url').value=bridge.baseUrl;
   }
   document.querySelectorAll('[data-bind]').forEach(el => el.addEventListener('change', () => {
     const path = el.dataset.bind; let v = el.value;
+    if (!canMeasure()) { syncForm(); return; }
     if(running && path==='hardware.backend') {syncForm();return;}
     if ((path.startsWith('hardware.') || principlePath(path)) && configurationLocked()) { syncForm(); return; }
     if (running && path.startsWith('sample.')) { syncForm(); return; }
@@ -133,6 +138,7 @@
     dirty = true; hist(P, 'config', 'DC current sweep updated'); if(running)$('parameter-status').textContent='Edited parameters have not been applied.';renderMode(); refreshTabs();
   });
   async function loadPreset(o) {
+    if (!canMeasure()) throw new Error('Measurement presets require the local workstation. Load a project to inspect or analyze data.');
     if (configurationLocked()) throw new Error('Pause or stop before loading a preset.');
     if (o.format !== 'halbach-hall-preset' || !HH.MODES[o.method?.kind]) throw new Error('Invalid measurement preset.');
     const base = newProject();
@@ -155,26 +161,10 @@
   }
   async function loadProjectObject(o, name) {
     if (running) throw new Error('Cannot load while a program is running.');
-    if (o.format !== 'halbach-hall-project') throw new Error('Not a Halbach Hall project file.');
-    if (o.version > 1) throw new Error('Project version ' + o.version + ' is newer than this application supports.');
-    const base = newProject(), np = Object.assign(base, o);
-    np.sample = Object.assign(base.sample, o.sample);
-    np.method = Object.assign(newProject().method, o.method);
-    for (const k of ['fixed', 'rotating']) np.method[k] = Object.assign(newProject().method[k], (o.method || {})[k]);
-    if (!o.method || !o.method.kind) np.method.kind = 'chirp';
-    np.hardware = Object.assign(newProject().hardware, o.hardware);
-    for (const k of ['tempController', 'magnet', 'source', 'measure']) np.hardware[k] = Object.assign(newProject().hardware[k], (o.hardware || {})[k]);
-    if (np.method.fixed.excitation === 'delta') { np.method.fixed.excitation = 'dc'; np.hardware.measure.dc_mode = 'delta'; }
-    if (!o.method?.cycles) np.method.cycles = Math.max(1, Math.ceil(np.method.dwell_s * np.method.rot_hz));
-    for (const r of np.runs) {
-      const s = r.samples, n = s && s.t ? s.t.length : -1;
-      if (n < 1 || ['theta', 'X', 'Y', 'I', 'T', 'valid'].some(k => !Array.isArray(s[k]) || s[k].length !== n)) {
-        throw new Error(`Run ${r.id}: inconsistent sample arrays.`);
-      }
-    }
+    const np = HH.normalizeProject(o);
     if (dirty && !confirm('Unsaved changes will be lost. Load anyway?')) return;
     P = np; ctrl = null; simDev = null; dirty = false; selRun = P.runs.length ? P.runs[0].id : null;
-    np.runs.forEach(r => { if (!r.fit && !r.fitError) fitRun(r); });
+    np.runs.forEach(fitRun);
     if (Array.isArray(o.log)) {
       Logger.entries = o.log.slice(-Logger.max);
       Logger.seq = Logger.entries.reduce((m, e) => Math.max(m, e.n || 0), 0);
@@ -185,7 +175,8 @@
     const loadedMsg = `Loaded ${name}: ${P.runs.length} run${P.runs.length === 1 ? '' : 's'}.`;
     $('mode-msg').innerHTML = `<div class="notice ok">${esc(loadedMsg)}</div>`;
     msg(loadedMsg, 'ok');
-    show(P.runs.length ? 'analysis' : 'mode');
+    dirty = true;
+    show(P.runs.length || !canMeasure() ? 'analysis' : 'mode');
   }
   $('preset-file').onchange = async ev => {
     const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
@@ -210,8 +201,8 @@
   };
 
   /* ---------------- hardware ---------------- */
-  for(const id of ['rust-url','rust-token']) $(id).addEventListener('change',()=>{
-    try{window.HHHardware.configure({baseUrl:$('rust-url').value,token:$('rust-token').value});connectionCheck=null;ctrl=null;simDev=null;$('rust-settings-status').textContent='Local Rust connection settings updated.';renderHardware();refreshTabs();}
+  $('rust-url').addEventListener('change',()=>{
+    try{window.HHHardware.configure({baseUrl:$('rust-url').value});hardwareAuthenticated=false;connectionCheck=null;ctrl=null;simDev=null;connectWorkstation();}
     catch(e){$('rust-settings-status').textContent=e.message;}
   });
   document.querySelectorAll('#hw-subtabs button').forEach(b => b.onclick = () => {
@@ -243,7 +234,7 @@
       ? connectionCheck.results.map(r => `<div class="notice ${r.warning ? '' : r.ok ? 'ok' : 'err'}">${esc(r.role)}: ${esc(r.message)}</div>`).join('')
       : '<div class="notice">Connections not checked for this configuration.</div>';
     const configErrors = HH.connectionErrors(P);
-    $('check-connections').disabled = configurationLocked() || configErrors.length > 0;
+    $('check-connections').disabled = !canMeasure() || configurationLocked() || configErrors.length > 0;
     $('check-reference').hidden = HH.usesVoltmeter(P.method);
     $('check-requirements').textContent = configErrors.length ? 'Configure the required devices and addresses: ' + configErrors.join('; ') : 'Required instruments configured. Ready to check connections.';
     for (const path of ['hardware.magnet.host', 'hardware.magnet.encoder_addr', 'hardware.magnet.encoder_ppr']) document.querySelector(`[data-bind="${path}"]`).closest('.field').hidden = !h.magnet.encoder;
@@ -264,9 +255,9 @@
     if (h.temperature === 'off' && document.querySelector('[data-pane="temp"]').classList.contains('active')) document.querySelector('#hw-subtabs [data-sub="magnet"]').click();
   }
   $('check-connections').onclick = async () => {
-    if (configurationLocked() || HH.connectionErrors(P).length) return;
+    if (!canMeasure() || configurationLocked() || HH.connectionErrors(P).length) return;
     checking = true; connectionCheck = null;
-    const key = connectionKey(), snapshot = JSON.parse(JSON.stringify(P));
+    const key = connectionKey(), snapshot = configurationSnapshot();
     renderHardware(); refreshTabs();
     try {
       const result = await HH.checkDevices(snapshot, window.HHHardware);
@@ -278,7 +269,7 @@
     } finally { checking = false; renderHardware(); refreshTabs(); }
   };
   $('check-reference').onclick = async () => {
-    if (running || checking) return;
+    if (!canMeasure() || running || checking) return;
     const ds = HH.selectedDevices(P).filter(d => d.role.startsWith('lockin'));
     if (!ds.length || HH.connectionErrors(P).length) { $('reference-result').textContent = 'Configure a lock-in and its address first.'; return; }
     $('check-reference').disabled = true;
@@ -292,11 +283,19 @@
     finally { $('check-reference').disabled = false; }
   };
   function setBadges() {
-    const isOfflineViewer = !hardwareAuthenticated && P.hardware.backend === 'real';
-    $('b-mode').textContent = P.hardware.backend === 'simulation'
+    const isOfflineViewer = !canMeasure();
+    document.body.classList.toggle('analysis-mode',isOfflineViewer);
+    $('b-ls').hidden=isOfflineViewer;$('b-run').hidden=isOfflineViewer;
+    $('b-mode').textContent = isOfflineViewer ? (accessChecking ? 'Connecting…' : 'Analysis mode') : P.hardware.backend === 'simulation'
       ? 'SIMULATION: synthetic data'
-      : (isOfflineViewer ? 'Data viewer / offline' : 'Real instruments');
-    $('b-mode').className = 'badge ' + (P.hardware.backend === 'simulation' ? 'sim' : (isOfflineViewer ? '' : 'ok'));
+      : 'Real instruments';
+    $('b-mode').className = 'badge ' + (isOfflineViewer ? '' : P.hardware.backend === 'simulation' ? 'sim' : 'ok');
+    $('actual-values-panel').hidden = isOfflineViewer || !['hardware','run'].includes(current);
+    $('access-title').textContent = accessChecking ? 'Connecting to the local workstation…' : isOfflineViewer ? 'Project inspection & data analysis' : 'Measurement workstation';
+    $('access-description').textContent = accessChecking ? 'Checking for a Rust service on this computer.' : isOfflineViewer ? 'Open a saved project to inspect raw data, adjust analysis inputs and export physical properties. Acquisition is available on the measurement PC.' : 'Local service connected. Choose a method, verify instruments and configure your measurement.';
+    $('workstation-reconnect').hidden = !window.HHHardware.isLocalPage;
+    $('workstation-reconnect').disabled = accessChecking || running || checking;
+    $('project-context').textContent = `${P.sample.id || 'Untitled project'} · ${P.runs.length} run${P.runs.length === 1 ? '' : 's'}`;
     const m = $('b-ls'); m.textContent = P.hardware.temperature === 'off' ? 'Temp: OFF' : P.hardware.backend === 'real' && connectionsOk() ? 'Temp: verified ('+P.hardware.temperature+')' : ctrl ? `Temp: ${P.hardware.temperature} (simulated)` : 'Temp: not connected'; m.className = 'badge ' + (ctrl || connectionsOk() ? 'ok' : '');
     const r = $('b-run'); r.textContent = running ? (runner?.state === 'paused' ? 'Paused' : 'Running') : 'Idle'; r.className = 'badge ' + (running ? 'run' : '');
     $('ls-connect').disabled = true; $('ls-disconnect').disabled = configurationLocked() || !ctrl; $('ls-heateroff').disabled = !ctrl || P.hardware.temperature !== 'control';
@@ -305,7 +304,7 @@
     document.querySelectorAll('#f-levels,#f-dc-currents').forEach(el=>el.disabled=checking);
     document.querySelectorAll('#p-temp .toolbar input,#p-temp .toolbar select,#p-temp .toolbar button').forEach(el=>el.disabled=running||checking);
     $('save-preset').disabled=checking; $('preset-file').disabled=configurationLocked();
-    $('rust-url').disabled=configurationLocked();$('rust-token').disabled=configurationLocked();
+    $('rust-url').disabled=configurationLocked();
     document.querySelectorAll('#mode-cards button').forEach(button=>button.disabled=configurationLocked());
     document.querySelectorAll('[data-step-index]').forEach(input=>input.disabled=running&&Number(input.dataset.stepIndex)<=(runner?.index??stepState.findIndex(x=>x==='start')));
     document.querySelectorAll('[data-release-config]').forEach(button=>{button.hidden=!connectionsOk()||configurationReleased;button.disabled=running||checking;});
@@ -314,6 +313,9 @@
     $('apply-parameters').disabled=checking||parameterBusy||HH.modeErrors(P).length>0||progErrors().length>0;
     $('r-pause').disabled=!running||runner?.state==='pausing'||(paused()&&(!connectionsOk()||HH.modeErrors(P).length>0));
     $('r-speed').disabled = running || P.hardware.backend === 'real';
+    if (isOfflineViewer) document.querySelectorAll('#p-mode button,#p-mode input,#p-mode select,#p-hardware button,#p-hardware input,#p-hardware select,#p-sample input,#p-sample textarea,#p-temp button,#p-temp input,#p-temp select,#p-run button').forEach(el => el.disabled = true);
+    for (const id of ['btn-quick-zero','btn-set-zero-pos','cal-50000','cal-50040']) $(id).disabled = isOfflineViewer || configurationLocked();
+    $('btn-refresh-actual').disabled = isOfflineViewer || checking || running;
   }
   async function connectController() {
     if (P.hardware.backend !== 'simulation' || P.hardware.temperature === 'off') return;
@@ -624,6 +626,7 @@
   /* ---------------- run ---------------- */
   function renderRun() {
     const n = $('run-notice'), why = [];
+    if (!canMeasure()) why.push('Measurement requires the local workstation.');
     if (!connectionsOk()) why.push('Check all selected device connections before running.');
     if (P.hardware.backend === 'real') why.push(...realRunErrors());
     if (P.hardware.backend === 'simulation' && P.hardware.temperature !== 'off' && !ctrl) why.push('Temperature device not connected.');
@@ -636,14 +639,14 @@
     P.tempProgram.forEach((s, i) => { const tr = t.insertRow(); tr.className = stepState[i] === 'start' ? 'cur' : stepState[i] === 'done' ? 'donest' : ''; tr.insertCell().textContent = i + 1; tr.insertCell().textContent = s.type; tr.insertCell().textContent = s.type === 'goto' ? `${s.T} K @ ${s.rate} K/min` : s.type === 'soak' ? s.seconds + ' s' : s.label || ''; tr.insertCell().textContent = stepState[i] === 'start' ? 'active' : stepState[i] === 'done' ? 'done' : ''; });
     drawTemp(); setBadges();
   }
-  function drawTemp() { if (current === 'run') HH.plot($('c-temp'), [{ x: trace.t, y: trace.sp, color: '#e3b96e' }, { x: trace.t, y: trace.T, color: '#66d6ce' }], { xlabel: 'virtual time (s)', ylabel: 'T (K)' }); }
+  function drawTemp() { if (current === 'run') HH.plot($('c-temp'), [{ x: trace.t, y: trace.sp, color: '#e3b96e' }, { x: trace.t, y: trace.T, color: '#66d6ce' }], { xlabel: P.hardware.backend==='simulation'?'Virtual time (s)':'Elapsed time (s)', ylabel: 'T (K)' }); }
   function updateKpis(s) {
     $('r-kpis').innerHTML = [['Temperature', fx(s.T, 4) + ' K'], ['Setpoint', fx(s.setpoint, 4) + ' K'], ['Heater', fx(s.heater, 3) + ' %'], ['Runs saved', P.runs.length], ['Elapsed', fmtDur(vnow)]].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('');
   }
   function setStatus(t) { $('r-status').textContent = t; }
   function realRunErrors() {
     const h=P.hardware,e=[];
-    if (location.protocol==='file:') e.push('Open the UI through Live Server or GitHub Pages and start the local Rust service.');
+    if (location.protocol==='file:') e.push('Open the local workstation URL served by start-workstation.bat.');
     if (!(h.magnet.counts_per_turn>0) || !(h.magnet.velocity_scale>0)) e.push('Configure calibrated OWIS counts per revolution and velocity conversion on Devices.');
     if (!['K6220','K6221','MFLI'].includes(h.source.model)) e.push('Real acquisition currently supports Keithley 6220/6221 or Zurich MFLI sources.');
     if (!HH.usesVoltmeter(P.method) && !['SR830','AMETEK7230','MFLI'].includes(h.measure.lockin1)) e.push('Select SR830, Ametek 7230, or Zurich MFLI as Lock-in 1 for real acquisition.');
@@ -651,7 +654,7 @@
     return e;
   }
   async function startRealProgram() {
-    if (realRunErrors().length) {renderRun();return;}
+    if (!canMeasure() || !connectionsOk() || realRunErrors().length) {renderRun();return;}
     let jobId=null,cursor=0,abortRequested=false;
     running=true; stepState=[];vnow=0;trace={t:[],T:[],sp:[]};const realStarted=Date.now();
     appliedMethod=JSON.parse(JSON.stringify(P.method));configurationReleased=false;
@@ -667,7 +670,7 @@
         runner.state=status.state;
         if(status.state==='paused')configurationReleased=true;
         for (const data of status.runs) {
-          const run=Object.assign({id:'run-'+String(P.runs.length+1).padStart(3,'0'),started:new Date().toISOString(),sample:JSON.parse(JSON.stringify(P.sample)),method:JSON.parse(JSON.stringify(P.method)),excluded:[]},data);
+          const run=Object.assign({id:nextRunId(),started:new Date().toISOString(),sample:JSON.parse(JSON.stringify(P.sample)),method:JSON.parse(JSON.stringify(P.method)),excluded:[]},data);
           if (run.incomplete) {run.fitError='Incomplete acquisition: retained raw samples.';run.fit=null;run.derived=null;} else fitRun(run);
           P.runs.push(run);selRun=run.id;dirty=true;hist(P,'run',run.id+' recorded from real instruments');
         }
@@ -702,7 +705,7 @@
   }
 
   $('r-start').onclick = async () => {
-    if (running) return;
+    if (!canMeasure() || running) return;
     if (!connectionsOk() || methodErrors().length || progErrors().length) return;
     if (P.hardware.backend === 'real') return startRealProgram();
     if (P.hardware.temperature === 'off') {
@@ -749,16 +752,16 @@
   $('r-abort').onclick = () => { if (runner && confirm('Abort the program? The heater will be switched off.')) runner.abort(); };
 
   async function measure(ctx, speed) {
-    const id = 'run-' + String(P.runs.length + 1).padStart(3, '0');
+    const id = nextRunId();
     Logger.info('MEAS', `${id}: ${P.method.kind} mode at ${ctx.T_set} K`);
     const T = await ctrl.readK();
-    const snapshot=JSON.parse(JSON.stringify(P));snapshot.method=JSON.parse(JSON.stringify(appliedMethod||P.method));
+    const snapshot=configurationSnapshot();snapshot.method=JSON.parse(JSON.stringify(appliedMethod||P.method));
     const res = await HH.acquire(snapshot, ctx, () => T === null ? 295 : T);
     if (P.hardware.temperature === 'off') { res.T_mean = null; res.samples.T.fill(null); }
     const dur = res.samples.t[res.samples.t.length - 1]; vnow += dur; simDev.advance(dur);
     if (speed > 0) await sleepReal(Math.min(dur * 1000 / speed, 5000));
     const run = { id, label: ctx.step.label || '', positionSource: connectionCheck?.positionSource||'owis', T_set: ctx.T_set, T_mean: res.T_mean, started: new Date().toISOString(), simulated: true, rsq_ohm: res.rsq_ohm, sample:snapshot.sample, method:snapshot.method, samples: res.samples, excluded: [] };
-    fitRun(run); P.runs.push(run);
+    fitRun(run); P.runs.push(run); P.simulated=P.runs.some(r=>r.simulated); dirty=true;
     hist(P, 'run', `${id} saved: T=${fx(run.T_mean)} K, n_s=${fx(run.derived?.ns)} m⁻²`, { run: id });
     Logger.info('MEAS', `${id} done: A1=${fx(run.fit?.A1)} Ω`);
     selRun = id; if (current === 'inspect' && $('i-live').checked) renderInspect();
@@ -767,70 +770,122 @@
     try {
       if (run.incomplete) throw new Error('Incomplete acquisition: retained raw samples without fitting.');
       run.fit = run.detectionKind === 'field-lockin' ? HH.fitFieldLockin(run.samples,run.method.rotating.excitation) : run.method?.kind === 'rotating' && run.method.rotating.excitation === 'dc' ? HH.fitCurrentSweep(run.samples) : HH.fitHarmonics(run.samples);
-      run.derived = HH.derive(run.fit, Object.assign({}, run.sample, { rsq_ohm: run.rsq_ohm ?? run.sample.rsq_ohm }));
+      run.derived = HH.derive(run.fit, analysisSample(run));
       if (run.fit.warnings) run.derived.warnings.push(...run.fit.warnings);
       run.fitError = null;
     } catch (e) { run.fit = null; run.derived = null; run.fitError = e.message; Logger.error('FIT', run.id + ': ' + e.message); }
+  }
+  function analysisSample(run) {
+    return { ...run.sample, rsq_ohm: run.rsq_ohm ?? run.sample?.rsq_ohm, ...run.analysisSample };
   }
 
   /* ---------------- data inspect ---------------- */
   const runById = id => P.runs.find(r => r.id === id);
   function renderInspect() {
-    const sel = $('i-run'); sel.replaceChildren(); P.runs.forEach(r => sel.add(new Option(`${r.id} — ${fx(r.T_mean, 4)} K ${r.label}`, r.id)));
+    const sel = $('i-run'); sel.replaceChildren(); P.runs.forEach(r => sel.add(new Option(`${r.id} · ${r.simulated ? 'simulated' : 'measured'} · ${Number.isFinite(r.T_mean) ? fx(r.T_mean, 4) + ' K' : 'temperature not recorded'} ${r.label || ''}`, r.id)));
     if ($('i-live').checked && P.runs.length) selRun = P.runs[P.runs.length - 1].id;
     if (!runById(selRun) && P.runs.length) selRun = P.runs[0].id;
     sel.value = selRun || ''; const r = runById(selRun);
-    if (!r) { $('i-kpis').innerHTML = '<div class="notice">No runs yet.</div>'; ['c-xth', 'c-xt', 'c-res'].forEach(c => HH.plot($(c), [])); $('i-table').innerHTML = ''; return; }
+    for (const id of ['i-refit','i-mask','i-unmask','i-export']) $(id).disabled = !r;
+    if (!r) { $('i-kpis').innerHTML = '<div class="notice">No runs yet. Open a saved project to inspect its raw data.</div>'; ['c-xth', 'c-xt', 'c-res','c-current-slope'].forEach(c => HH.plot($(c), [])); $('i-slope-card').hidden = true; $('i-table').innerHTML = ''; return; }
     const s = r.samples, f = r.fit, d = r.derived;
     $('i-slope-info').textContent = '';
     for (const id of ['c-xth','c-res']) $(id).closest('.card').hidden = r.detectionKind === 'field-lockin';
     $('i-slope-card').hidden = !f?.currentSlope;
     if (f?.currentSlope) {
       const slope = f.currentSlope, x = slope.points.map(p => p.I), y = slope.points.map(p => p.voltage);
-      HH.plot($('c-current-slope'), [{x, y, color:'#66d6ce', kind:'points'}, {x, y:x.map(I=>slope.intercept+slope.slope*I), color:'#e3b96e'}], {xlabel:'DC current (A)', ylabel:'Signed Hall voltage (V)'});
-      $('i-slope-info').textContent = `Slope ${fx(slope.slope)} V/A; fitted intercept ${fx(slope.intercept)} V. ${slope.points.length} distinct currents; no separate zero-current background subtraction.`;
+      HH.plot($('c-current-slope'), [{x, y, color:'#66d6ce', kind:'points'}, {x, y:x.map(I=>slope.intercept+slope.slope*I), color:'#e3b96e'}], {xlabel: r.method.rotating.excitation === 'dc' ? 'DC current (A)' : 'RMS current (A)', ylabel:'Signed Hall voltage (V)'});
+      $('i-slope-info').textContent = `Slope ${fx(slope.slope)} V/A; ${slope.points.length === 1 ? 'assumed zero offset' : 'fitted intercept'} ${fx(slope.intercept)} V. ${slope.points.length} distinct currents.`;
       if (r.detectionKind==='field-lockin') $('i-slope-info').textContent += ' RMS lock-in output normalized to Hall amplitude; verify reference phase and gain.';
     }
     $('i-kpis').innerHTML = [['T mean', fx(r.T_mean, 5) + ' K'], ['Samples (valid)', `${s.t.length} (${s.valid.reduce((a, b) => a + b, 0)})`], ['A1', f ? fx(f.A1) + ' Ω' : '—'], ['D1/A1', f ? fx(f.D1 / f.A1, 3) : '—'], ['A2', f ? fx(f.A2) + ' Ω' : '—'], ['Fit rms', f ? fx(f.rms) + ' V' : '—'], ['Condition', f ? fx(f.cond, 3) : '—'], ['Carrier', d?.carrier || '—']].map(([a, b]) => `<div class="kpi"><span>${a}</span><b>${esc(b)}</b></div>`).join('') + (r.fitError ? `<div class="notice err">${esc(r.fitError)}</div>` : '') + (d ? d.warnings.map(w => `<div class="notice">${esc(w)}</div>`).join('') : '') + (r.simulated ? '<div class="notice">Simulated data.</div>' : '');
     // choose one current level for X vs angle readability: all valid points, X/I normalised to ohm
-    const vi = [], mi = []; s.theta.forEach((th, i) => { if (s.I[i] !== 0) (s.valid[i] ? vi : mi).push(i); });
+    const vi = [], mi = []; s.theta.forEach((th, i) => { if (Number.isFinite(th) && Number.isFinite(s.I[i]) && Number.isFinite(s.X[i]) && s.I[i] !== 0) (s.valid[i] ? vi : mi).push(i); });
     const wrap = th => { const w = ((th % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI); return w * 180 / Math.PI; };
     const R = i => s.X[i] / s.I[i];
-    const model = i => { if (!f) return NaN; const th = s.theta[i]; return f.A1 * Math.cos(th) + f.D1 * Math.sin(th) + f.A2 * Math.sin(2 * th) + f.B2c * Math.cos(2 * th) + (isFinite(f.b0) ? f.b0 : 0) + f.o0 / s.I[i]; };
+    const model = i => f ? HH.predictVoltage(f, s.theta[i], s.I[i]) / s.I[i] : null;
     HH.plot($('c-xth'), [{ x: mi.map(i => wrap(s.theta[i])), y: mi.map(R), color: '#566677', kind: 'points' }, { x: vi.map(i => wrap(s.theta[i])), y: vi.map(R), color: '#66d6ce', kind: 'points' }, { x: vi.map(i => wrap(s.theta[i])), y: vi.map(model), color: '#e3b96e', kind: 'points' }], { xlabel: 'field angle (deg)', ylabel: 'X / I (Ω)' });
     HH.plot($('c-xt'), [{ x: s.t, y: s.X, color: '#66d6ce' }, { x: s.t, y: s.Y, color: '#80aaf9' }], { xlabel: 't (s)', ylabel: 'lock-in (V)' });
-    HH.plot($('c-res'), [{ x: vi.map(i => wrap(s.theta[i])), y: vi.map(i => R(i) - model(i)), color: '#80aaf9', kind: 'points' }], { xlabel: 'field angle (deg)', ylabel: 'residual (Ω)' });
+    HH.plot($('c-res'), f ? [{ x: vi.map(i => wrap(s.theta[i])), y: vi.map(i => R(i) - model(i)), color: '#80aaf9', kind: 'points' }] : [], { xlabel: 'field angle (deg)', ylabel: 'residual (Ω)' });
     const t = $('i-table'); t.innerHTML = '<tr><th>t (s)</th><th>θ (deg)</th><th>X (V)</th><th>Y (V)</th><th>I (A)</th><th>T (K)</th><th>valid</th></tr>';
-    const stride = Math.max(1, Math.floor(s.t.length / 300));
-    for (let i = 0; i < s.t.length; i += stride) { const tr = t.insertRow(); [s.t[i].toFixed(2), (s.theta[i] * 180 / Math.PI).toFixed(1), fx(s.X[i], 4), fx(s.Y[i], 3), fx(s.I[i], 4), fx(s.T[i], 4), s.valid[i]].forEach(v => tr.insertCell().textContent = v); }
+    const stride = Math.max(1, Math.ceil(s.t.length / 300));
+    $('i-table-info').textContent = stride > 1 ? `Showing every ${stride}th sample of ${s.t.length}. Raw CSV contains every sample.` : `${s.t.length} raw samples.`;
+    for (let i = 0; i < s.t.length; i += stride) { const tr = t.insertRow(); [fx(s.t[i], 4), Number.isFinite(s.theta[i]) ? fx(s.theta[i] * 180 / Math.PI) : '—', fx(s.X[i], 4), fx(s.Y[i], 3), fx(s.I[i], 4), fx(s.T[i], 4), s.valid[i]].forEach(v => tr.insertCell().textContent = v); }
   }
   $('i-run').onchange = () => { selRun = $('i-run').value; $('i-live').checked = false; renderInspect(); };
   $('i-live').onchange = renderInspect;
   $('i-refit').onclick = () => { const r = runById(selRun); if (r) { fitRun(r); hist(P, 'analysis', `refit ${r.id}`); dirty = true; renderInspect(); } };
   function maskRange(val) {
     const r = runById(selRun); if (!r) return; const a = Number($('i-m0').value), b = Number($('i-m1').value);
-    if (!(b > a)) { Logger.warn('UI', 'Invalid mask range'); return; }
+    if (!$('i-m0').value.trim() || !$('i-m1').value.trim() || !Number.isFinite(a) || !Number.isFinite(b) || !(b > a)) { $('i-mask-status').textContent = 'Enter finite start and end times, with end greater than start.'; return; }
     let n = 0; r.samples.t.forEach((t, i) => { if (t >= a && t <= b && r.samples.valid[i] !== val) { r.samples.valid[i] = val; n++; } });
     r.excluded.push({ from: a, to: b, valid: val, n }); fitRun(r);
+    $('i-mask-status').textContent = `${n} samples ${val ? 'restored' : 'excluded'}.`;
     hist(P, 'analysis', `${r.id}: ${val ? 'restored' : 'excluded'} ${n} samples in t=[${a}, ${b}] s`); dirty = true; renderInspect();
   }
   $('i-mask').onclick = () => maskRange(0); $('i-unmask').onclick = () => maskRange(1);
 
   /* ---------------- analysis ---------------- */
-  const COLS = [['id', 'Run', r => r.id], ['T', 'T (K)', r => fx(r.T_mean, 5)], ['ns', 'n_s (cm⁻²)', r => fx(r.derived?.ns / 1e4)], ['ns_e', '± ', r => fx(r.derived?.ns_err / 1e4, 2)],
-    ['rh', 'R_H (cm³/C)', r => fx(r.derived?.RH * 1e6)], ['mu', 'µ (cm²/Vs)', r => fx(r.derived?.mu * 1e4)], ['rs', 'R□ (Ω)', r => fx(r.rsq_ohm ?? r.sample.rsq_ohm)], ['A1', 'A1 (Ω)', r => fx(r.fit?.A1)], ['A1e', '± A1', r => fx(r.fit?.A1_err, 2)], ['D1', 'D1 (Ω)', r => fx(r.fit?.D1)], ['A2', 'A2 (Ω)', r => fx(r.fit?.A2)], ['ty', 'Type', r => r.derived?.carrier || ''], ['sim', 'Sim', r => r.simulated ? 'yes' : '']];
-  function renderAnalysis() {
-    const t = $('a-table'); t.innerHTML = '<tr>' + COLS.map(c => `<th>${esc(c[1])}</th>`).join('') + '</tr>';
-    P.runs.forEach(r => { const tr = t.insertRow(); COLS.forEach(c => tr.insertCell().textContent = c[2](r)); });
-    const ok = P.runs.filter(r => r.derived && Number.isFinite(r.T_mean)), T = ok.map(r => r.T_mean);
-    HH.plot($('c-ns'), [{ x: T, y: ok.map(r => r.derived.ns / 1e4), color: '#66d6ce', kind: 'points' }, { x: T, y: ok.map(r => r.derived.ns / 1e4), color: '#66d6ce' }], { xlabel: 'T (K)', ylabel: 'n_s (cm⁻²)' });
-    HH.plot($('c-mu'), [{ x: T, y: ok.map(r => r.derived.mu * 1e4), color: '#80aaf9' }, { x: T, y: ok.map(r => r.derived.mu * 1e4), color: '#80aaf9', kind: 'points' }], { xlabel: 'T (K)', ylabel: 'µ (cm²/Vs)' });
-    HH.plot($('c-rh'), [{ x: T, y: ok.map(r => r.derived.RH * 1e6), color: '#e3b96e' }, { x: T, y: ok.map(r => r.derived.RH * 1e6), color: '#e3b96e', kind: 'points' }], { xlabel: 'T (K)', ylabel: 'R_H (cm³/C)' });
-    HH.plot($('c-rs'), [{ x: T, y: ok.map(r => r.rsq_ohm ?? r.sample.rsq_ohm), color: '#f08a8a' }, { x: T, y: ok.map(r => r.rsq_ohm ?? r.sample.rsq_ohm), color: '#f08a8a', kind: 'points' }], { xlabel: 'T (K)', ylabel: 'R□ (Ω)' });
+  const scaled = (v, factor) => Number.isFinite(v) ? v * factor : null;
+  const COLS = [
+    ['id','Run',r=>r.id], ['status','Status',r=>r.fitError || (Number.isFinite(r.derived?.RH) ? 'Analyzed' : 'Fit only')],
+    ['source','Data',r=>r.simulated ? 'Simulated' : 'Measured'], ['T','T (K)',r=>r.T_mean],
+    ['ns','n_s (cm⁻²)',r=>scaled(r.derived?.ns,1e-4)], ['ns_e','σ n_s (cm⁻²)',r=>scaled(r.derived?.ns_err,1e-4)],
+    ['n','n (cm⁻³)',r=>scaled(r.derived?.n,1e-6)], ['rh','R_H (cm³/C)',r=>scaled(r.derived?.RH,1e6)],
+    ['rh_e','σ R_H (cm³/C)',r=>scaled(r.derived?.RH_err,1e6)], ['mu','μ (cm²/Vs)',r=>scaled(r.derived?.mu,1e4)],
+    ['mu_e','σ μ (cm²/Vs)',r=>scaled(r.derived?.mu_err,1e4)], ['rho','ρ (Ω·cm)',r=>scaled(r.derived?.rho,100)],
+    ['rs','R□ (Ω)',r=>analysisSample(r).rsq_ohm], ['A1','A1 (Ω)',r=>r.fit?.A1], ['A1e','σ A1 (Ω)',r=>r.fit?.A1_err],
+    ['D1','D1 (Ω)',r=>r.fit?.D1], ['A2','A2 (Ω)',r=>r.fit?.A2], ['ty','Carrier',r=>r.derived?.carrier],
+    ['warnings','Warnings',r=>r.derived?.warnings?.join(' ') || ''],
+  ];
+  const resultCell = value => typeof value === 'number' ? fx(value) : value ?? '—';
+  const visibleRuns = () => P.runs.filter(r => $('a-filter').value === 'all' || ($('a-filter').value === 'simulated') === !!r.simulated);
+  function analysisAxis(runs) {
+    const temperature = $('a-axis').value === 'temperature' || ($('a-axis').value === 'auto' && runs.length > 0 && runs.every(r=>Number.isFinite(r.T_mean)));
+    return { temperature, label: temperature ? 'Temperature (K)' : 'Run number', x: r => temperature ? r.T_mean : P.runs.indexOf(r) + 1 };
   }
-  const csvCell = v => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v);
-  $('a-csv').onclick = () => { download((P.sample.id || 'hall') + '_summary.csv', [COLS.map(c => c[1]).join(','), ...P.runs.map(r => COLS.map(c => csvCell(c[2](r))).join(','))].join('\n'), 'text/csv'); Logger.info('IO', 'Exported summary CSV'); };
-
+  function propertySeries(runs, property, factor, axis) {
+    return [false,true].flatMap(simulated => {
+      const points = runs.filter(r=>!!r.simulated === simulated && Number.isFinite(axis.x(r)) && Number.isFinite(property(r))).sort((a,b)=>axis.x(a)-axis.x(b));
+      const x=points.map(axis.x), y=points.map(r=>property(r)*factor), color=simulated?'#e3b96e':'#66d6ce';
+      return [{x,y,color,kind:'points'}, ...(axis.temperature ? [{x,y,color}] : [])];
+    });
+  }
+  function renderAnalysis() {
+    const runs = visibleRuns(), axis = analysisAxis(runs);
+    const t = $('a-table'); t.innerHTML = '<tr>' + COLS.map(c => `<th>${esc(c[1])}</th>`).join('') + '</tr>';
+    runs.forEach(r => { const tr = t.insertRow(); tr.classList.toggle('sel',r.id===selRun); COLS.forEach(c => tr.insertCell().textContent = resultCell(c[2](r))); });
+    const selected = $('a-run'); selected.replaceChildren(); runs.forEach(r=>selected.add(new Option(r.id + (r.simulated?' · simulated':' · measured'),r.id)));
+    if (!runs.some(r=>r.id===selRun)) selRun=runs[0]?.id || null;
+    selected.value=selRun || '';
+    const r=runById(selRun), s=r ? analysisSample(r) : {};
+    for (const [id,key] of [['a-thickness','thickness_nm'],['a-field','B_T'],['a-tilt','tilt_deg'],['a-rsq','rsq_ohm']]) { $(id).value=s[key] ?? ''; $(id).disabled=!r; }
+    for (const id of ['a-apply','a-reset','a-inspect']) $(id).disabled=!r;
+    $('a-csv').disabled=!runs.length; $('a-refit').disabled=!P.runs.length;
+    $('analysis-empty').hidden=!!P.runs.length;
+    $('analysis-content').hidden=!P.runs.length;
+    $('a-kpis').innerHTML=[['Runs shown',runs.length],['Analyzed',runs.filter(r=>r.fit && Number.isFinite(r.derived?.RH)).length],['Fit failed / partial',runs.filter(r=>!r.fit).length],['Simulated',runs.filter(r=>r.simulated).length]].map(([label,value])=>`<div class="kpi"><span>${label}</span><b>${value}</b></div>`).join('');
+    $('a-notice').textContent = !runs.length ? 'No runs match this filter.' : axis.temperature ? `${runs.filter(r=>!Number.isFinite(r.T_mean)).length} runs without temperature are omitted from these plots.` : 'Plotted by run number so measurements without recorded temperature remain visible.';
+    $('a-run-status').textContent = r ? `${r.id}: ${r.fitError || `${r.fit.n} usable samples; ${r.fit.levels} current levels.`} ${r.derived?.warnings?.join(' ') || ''}` : '';
+    const specs=[['c-ns',r=>r.derived?.ns,1e-4,'Hall sheet density (cm⁻²)'],['c-mu',r=>r.derived?.mu,1e4,'Hall mobility (cm²/Vs)'],['c-rh',r=>r.derived?.RH,1e6,'Hall coefficient (cm³/C)'],['c-rs',r=>analysisSample(r).rsq_ohm,1,'Sheet resistance (Ω)']];
+    specs.forEach(([id,fn,factor,label])=>HH.plot($(id),propertySeries(runs,fn,factor,axis),{xlabel:axis.label,ylabel:label,integerX:!axis.temperature}));
+  }
+  $('a-run').onchange=()=>{selRun=$('a-run').value;renderAnalysis();};
+  $('a-filter').onchange=renderAnalysis; $('a-axis').onchange=renderAnalysis;
+  $('a-inspect').onclick=()=>{ $('i-live').checked=false; show('inspect'); };
+  $('a-apply').onclick=()=>{
+    const r=runById(selRun); if (!r) return;
+    const values={};
+    for (const [id,key] of [['a-thickness','thickness_nm'],['a-field','B_T'],['a-tilt','tilt_deg'],['a-rsq','rsq_ohm']]) {
+      const text=$(id).value.trim(); values[key]=text === '' ? null : Number(text);
+    }
+    if (!Number.isFinite(values.thickness_nm) || values.thickness_nm<=0 || !Number.isFinite(values.B_T) || values.B_T<=0 || !Number.isFinite(values.tilt_deg) || (values.rsq_ohm !== null && (!Number.isFinite(values.rsq_ohm) || values.rsq_ohm<=0))) { $('a-run-status').textContent='Enter positive thickness and field, a finite tilt, and positive sheet resistance or leave it blank.'; return; }
+    r.analysisSample=values; fitRun(r); dirty=true; hist(P,'analysis',r.id+': applied analysis geometry and resistance',values); renderAnalysis();
+  };
+  $('a-reset').onclick=()=>{const r=runById(selRun);if(!r)return;delete r.analysisSample;fitRun(r);dirty=true;hist(P,'analysis',r.id+': restored acquisition geometry');renderAnalysis();};
+  $('a-refit').onclick=()=>{P.runs.forEach(fitRun);dirty=true;hist(P,'analysis','Recalculated all run fits and physical properties');renderAnalysis();};
+  const csvCell = v => { const text=v===undefined || v===null || (typeof v==='number'&&!Number.isFinite(v))?'':String(v); return /[",\r\n]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text; };
+  $('a-csv').onclick=()=>{download((P.sample.id||'hall')+'_summary.csv',[COLS.map(c=>csvCell(c[1])).join(','),...visibleRuns().map(r=>COLS.map(c=>csvCell(c[2](r))).join(','))].join('\r\n'),'text/csv');Logger.info('IO','Exported summary CSV');};
   /* ---------------- history ---------------- */
   function renderHistory() {
     const t = $('h-table'); t.innerHTML = '<tr><th>#</th><th>Time</th><th>Kind</th><th>Event</th></tr>';
@@ -868,9 +923,10 @@
   /* ---------------- project / report ---------------- */
   function msg(t, kind) { $('pr-msg').innerHTML = `<div class="notice ${kind || ''}">${esc(t)}</div>`; }
   $('pr-save').onclick = () => {
+    hist(P, 'project', 'saved project'); Logger.info('IO', 'Saved project');
     P.log = Logger.entries.slice(-20000); P.modified = new Date().toISOString();
     const name = (P.sample.id || 'hall_project').replace(/[^\w.-]+/g, '_') + '.hallproj.json';
-    download(name, JSON.stringify(P), 'application/json'); dirty = false; hist(P, 'project', 'saved ' + name); Logger.info('IO', 'Saved project ' + name);
+    download(name, JSON.stringify(P), 'application/json'); dirty = false;
     msg('Saved ' + name, 'ok');
   };
   $('pr-load').onchange = async ev => {
@@ -882,11 +938,12 @@
       msg('Load failed: ' + e.message, 'err');
     }
   };
-  $('pr-new').onclick = async () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = newProject(); connectionCheck = null; ctrl = null; simDev = null; dirty = false; selRun = null; syncForm(); setBadges(); hist(P, 'project', 'new project'); show('mode'); };
+  $('pr-new').onclick = async () => { if (running) return; if (!confirm('Start a new project? Unsaved data will be lost.')) return; P = newProject(); connectionCheck = null; ctrl = null; simDev = null; dirty = false; selRun = null; trace={t:[],T:[],sp:[]};stepState=[];syncForm(); setBadges(); hist(P, 'project', 'new project'); show(canMeasure() ? 'mode' : 'project'); };
   $('pr-csv').onclick = () => {
     const r = runById(selRun) || P.runs[0]; if (!r) { msg('No runs to export.', 'err'); return; }
-    const s = r.samples; download(`${r.id}_raw.csv`, 't_s,theta_rad,X_V,Y_V,I_A,T_K,valid\n' + s.t.map((t, i) => [t, s.theta[i], s.X[i], s.Y[i], s.I[i], s.T[i], s.valid[i]].join(',')).join('\n'), 'text/csv');
+    const s = r.samples; download(`${r.id}_raw.csv`, 't_s,theta_rad,X_V,Y_V,I_A,T_K,valid\r\n' + s.t.map((t, i) => [t, s.theta[i], s.X[i], s.Y[i], s.I[i], s.T[i], s.valid[i]].map(csvCell).join(',')).join('\r\n'), 'text/csv');
   };
+  $('i-export').onclick = () => $('pr-csv').onclick();
   function chartImage(series, o) { const c = document.createElement('canvas'); c.width = 760; c.height = 300; return HH.plot(c, series, Object.assign({ print: true }, o)); }
   function modeRows(row) {
     const m = P.method, md = HH.MODES[m.kind]; if (!md) return row('Mode', 'unknown');
@@ -896,18 +953,22 @@
     return r.join('');
   }
   $('pr-report').onclick = () => {
-    const ok = P.runs.filter(r => r.derived && Number.isFinite(r.T_mean)), T = ok.map(r => r.T_mean), s = P.sample, m = P.method;
+    const ok = P.runs.filter(r => r.derived), s = P.sample, m = P.method;
+    const axis = analysisAxis(ok);
     const row = (a, b) => `<tr><th>${esc(a)}</th><td>${esc(b)}</td></tr>`;
-    const imgs = ok.length ? [['n_s (cm⁻²)', r => r.derived.ns / 1e4], ['µ (cm²/Vs)', r => r.derived.mu * 1e4], ['R_H (cm³/C)', r => r.derived.RH * 1e6]].map(([l, fn]) => `<h3>${esc(l)} vs temperature</h3><img alt="${esc(l)}" src="${chartImage([{ x: T, y: ok.map(fn), color: '#1b6fb5' }, { x: T, y: ok.map(fn), color: '#1b6fb5', kind: 'points' }], { xlabel: 'T (K)', ylabel: l })}">`).join('') : '<p>No analysed runs.</p>';
+    const imgs = ok.length ? [['n_s (cm⁻²)', r => r.derived.ns,1e-4], ['μ (cm²/Vs)', r => r.derived.mu,1e4], ['R_H (cm³/C)', r => r.derived.RH,1e6]].map(([l,fn,factor])=>`<h3>${esc(l)}</h3><img alt="${esc(l)}" src="${chartImage(propertySeries(ok,fn,factor,axis),{xlabel:axis.label,ylabel:l})}">`).join('') : '<p>No analysed runs.</p>';
     const steps = P.tempProgram.map((st, i) => `<tr><td>${i + 1}</td><td>${esc(st.type)}</td><td>${esc(JSON.stringify(Object.fromEntries(Object.entries(st).filter(([k]) => k !== 'type'))))}</td></tr>`).join('');
     const logs = Logger.entries.filter(e => e.level === 'warn' || e.level === 'error').slice(-50).map(e => `<tr><td>${esc(new Date(e.t).toISOString())}</td><td>${esc(e.level)}</td><td>${esc(e.src + ': ' + e.msg)}</td></tr>`).join('');
     const sim = P.runs.some(r => r.simulated);
+    const reportCols = COLS.filter(c=>['id','source','T','ns','n','rh','mu','rho'].includes(c[0]));
     $('report').innerHTML = `<h1>Hall effect measurement report</h1>${sim ? '<p><b>WARNING: contains SIMULATED data — not a measurement.</b></p>' : ''}
       <p>Generated ${esc(new Date().toLocaleString())}. Project created ${esc(P.created)}.</p>
       <h2>Sample</h2><table>${row('ID', s.id)}${row('Thickness', s.thickness_nm + ' nm')}${row('Width × length', s.width_um + ' × ' + s.length_um + ' µm')}${row('Field B', s.B_T + ' T')}${row('Tilt', s.tilt_deg + '°')}${row('Notes', s.notes)}</table>
       <h2>Measurement mode</h2><table>${modeRows(row)}${row('Lock-in time constant', m.tc_ms + ' ms')}${row('Current source', (HH.SOURCES[P.hardware.source.model] || {}).name || 'none')}${row('Temperature controller', tl().model + ' ' + tl().address + ', input ' + tl().input + ', loop ' + tl().loop)}</table>
       <h2>Temperature program</h2><table><tr><th>#</th><th>Step</th><th>Parameters</th></tr>${steps}</table>
-      <h2>Results</h2><table><tr>${COLS.map(c => `<th>${esc(c[1])}</th>`).join('')}</tr>${P.runs.map(r => '<tr>' + COLS.map(c => `<td>${esc(c[2](r))}</td>`).join('') + '</tr>').join('')}</table>
+      <h2>Results</h2><table><tr>${reportCols.map(c => `<th>${esc(c[1])}</th>`).join('')}</tr>${P.runs.map(r => '<tr>' + reportCols.map(c => `<td>${esc(resultCell(c[2](r)))}</td>`).join('') + '</tr>').join('')}</table>
+      <h2>Fit diagnostics and statistical uncertainties (1σ)</h2><table><tr><th>Run</th><th>A1 ± σ (Ω)</th><th>n_s ± σ (cm⁻²)</th><th>R_H ± σ (cm³/C)</th><th>μ ± σ (cm²/Vs)</th><th>Status / warnings</th></tr>${P.runs.map(r=>'<tr>'+[r.id,fx(r.fit?.A1)+' ± '+fx(r.fit?.A1_err),fx(scaled(r.derived?.ns,1e-4))+' ± '+fx(scaled(r.derived?.ns_err,1e-4)),fx(scaled(r.derived?.RH,1e6))+' ± '+fx(scaled(r.derived?.RH_err,1e6)),fx(scaled(r.derived?.mu,1e4))+' ± '+fx(scaled(r.derived?.mu_err,1e4)),r.fitError||r.derived?.warnings?.join(' ')||'Fit completed'].map(v=>`<td>${esc(v)}</td>`).join('')+'</tr>').join('')}</table>
+      <h2>Inputs used for each run</h2><table><tr><th>Run</th><th>Method</th><th>Thickness (nm)</th><th>B (T)</th><th>Tilt (°)</th><th>R□ (Ω)</th><th>Analysis correction</th></tr>${P.runs.map(r=>{const a=analysisSample(r);return '<tr>'+[r.id,HH.MODES[r.method.kind]?.label||r.method.kind,a.thickness_nm,a.B_T,a.tilt_deg,a.rsq_ohm,r.analysisSample?'yes':'no'].map(v=>`<td>${esc(resultCell(v))}</td>`).join('')+'</tr>';}).join('')}</table>
       <div class="pb"></div><h2>Plots</h2>${imgs}
       <h2>Assumptions</h2><p>Quantities follow the CHIRP guide §10 and assume a uniform bar geometry, ohmic contacts, an ordinary Hall coefficient independent of field orientation, and a validated field magnitude and angle calibration. n<sub>s</sub> is the Hall sheet density (no scattering factor applied); µ is the Hall mobility. Uncertainties are 1σ statistical from the harmonic fit only; calibration and geometry uncertainty are not included.</p>
       <h2>Warnings and errors (last 50)</h2><table>${logs || '<tr><td>None recorded</td></tr>'}</table>
@@ -921,6 +982,7 @@
     voltageX: null, voltageY: null, angleDeg: null, counter: null,
     tempStatus: null, elapsedS: 0
   };
+  let telemetryBusy = false;
 
   function updateActualTelemetry(data) {
     Object.assign(actualTelemetry, data);
@@ -1003,7 +1065,9 @@
   }
 
   async function pollLiveTelemetry() {
+    if (!canMeasure() || checking || telemetryBusy || !connectionsOk()) return;
     if (running && P.hardware.backend === 'real') return;
+    telemetryBusy = true;
     try {
       if (P.hardware.backend === 'real' && window.HHHardware) {
         // Read temperature if active
@@ -1051,11 +1115,11 @@
       renderActualPanel();
     } catch (e) {
       Logger.debug('ACT', 'Poll readings: ' + e.message);
-    }
+    } finally { telemetryBusy = false; }
   }
 
   async function setZeroPosition() {
-    if (running) return;
+    if (!canMeasure() || configurationLocked() || running || checking) return;
     const statusEl = $('zero-pos-status');
     try {
       if (P.hardware.backend === 'real' && window.HHHardware && P.hardware.magnet.rotator_addr) {
@@ -1075,6 +1139,7 @@
           const dir = P.hardware.magnet.dir_sign || 1;
           const newOffset = -rawAngle * dir;
           P.hardware.magnet.angle_offset_deg = +newOffset.toFixed(4);
+          dirty=true;connectionCheck=null;
           syncForm();
           if (statusEl) statusEl.textContent = `Zero set: counter ${mr.counter} mapped to 0.0° (offset: ${P.hardware.magnet.angle_offset_deg}°).`;
           hist(P, 'config', `Set angle 0° at counter ${mr.counter}`);
@@ -1084,8 +1149,9 @@
           return;
         }
       }
-      // Simulation or fallback:
+      if (P.hardware.backend !== 'simulation') throw new Error('No valid motor position received. Zero calibration was not changed.');
       P.hardware.magnet.angle_offset_deg = 0;
+      dirty=true;connectionCheck=null;
       actualTelemetry.angleDeg = 0.0;
       if (statusEl) statusEl.textContent = 'Zero offset set to 0.0°.';
       syncForm();
@@ -1103,13 +1169,17 @@
 
   const cal50000 = $('cal-50000');
   if (cal50000) cal50000.onclick = () => {
+    if (!canMeasure() || configurationLocked()) return;
     P.hardware.magnet.counts_per_turn = 50000;
+    dirty=true;connectionCheck=null;
     syncForm();
     hist(P, 'config', 'OWIS counts set to 50000 (138.89 inc/deg, 400°=55556 inc)');
   };
   const cal50040 = $('cal-50040');
   if (cal50040) cal50040.onclick = () => {
+    if (!canMeasure() || configurationLocked()) return;
     P.hardware.magnet.counts_per_turn = 50040;
+    dirty=true;connectionCheck=null;
     syncForm();
     hist(P, 'config', 'OWIS counts set to 50040 (139 inc/deg)');
   };
@@ -1120,132 +1190,22 @@
     }
   }, 1000);
 
-  /* ---------------- Splash Modal & Token Persistence ---------------- */
-  async function initTokenSplash() {
-    const splashModal = $('splash-modal');
-    const splashInput = $('splash-token-input');
-    const splashStatus = $('splash-modal-status');
-    const hostname = window.location.hostname;
-    const isRemote = hostname.endsWith('github.io') ||
-                     (hostname && !['localhost', '127.0.0.1', '[::1]'].includes(hostname) && window.location.protocol !== 'file:');
-
-    // On GitHub Pages or remote client computers: NEVER show token splash modal!
-    // App opens directly in data viewer & analysis mode for reading previously acquired data.
-    if (isRemote) {
-      hardwareAuthenticated = false;
-      if (splashModal) splashModal.style.display = 'none';
-      setBadges();
-      refreshTabs();
-      show('mode');
-      return;
-    }
-
-    // On the local instrument workstation:
-    const settings = window.HHHardware.settings?.() || { baseUrl: 'http://127.0.0.1:8765', token: '' };
-
-    if (settings.token) {
-      if (splashInput) splashInput.value = settings.token;
-      // Validate saved/embedded token with backend
-      try {
-        const v = await window.HHHardware.verifyToken(settings.token);
-        if (v.ok) {
-          hardwareAuthenticated = true;
-          if (splashModal) splashModal.style.display = 'none';
-          setBadges();
-          refreshTabs();
-          show('mode');
-          return;
-        }
-      } catch (_) {}
-    }
-
-    // Check if the local Rust service is even running before popping up any modal
-    let serviceActive = false;
-    try {
-      const resp = await fetch('http://127.0.0.1:8765/status', { method: 'GET', signal: AbortSignal.timeout(600) });
-      if (resp.ok) serviceActive = true;
-    } catch (_) {}
-
-    if (!serviceActive && !window.__HALBACH_EMBEDDED_TOKEN__) {
-      // Local service is not running; stay in offline/viewer mode without modal popup
-      hardwareAuthenticated = false;
-      if (splashModal) splashModal.style.display = 'none';
-      setBadges();
-      refreshTabs();
-      show('mode');
-      return;
-    }
-
-    // Local service IS running on this PC, but we need a valid pairing token
-    hardwareAuthenticated = false;
-    setBadges();
-    refreshTabs();
-    if (splashModal && P.hardware.backend === 'real') {
-      splashModal.style.display = 'flex';
-      if (splashInput) splashInput.focus();
-    }
-
-    async function applyToken(tokenVal) {
-      const trimmed = (tokenVal || '').trim();
-      if (!trimmed) {
-        if (splashStatus) {
-          splashStatus.textContent = 'Please enter your pairing token.';
-          splashStatus.style.display = 'block';
-        }
-        return;
-      }
-      if (splashStatus) {
-        splashStatus.textContent = 'Verifying token with Rust service on 127.0.0.1:8765...';
-        splashStatus.className = 'notice';
-        splashStatus.style.display = 'block';
-      }
-      const v = await window.HHHardware.verifyToken(trimmed);
-      if (!v.ok) {
-        if (splashStatus) {
-          splashStatus.textContent = v.error || 'Invalid token or service unreachable.';
-          splashStatus.className = 'notice err';
-          splashStatus.style.display = 'block';
-        }
-        return;
-      }
-      // Token verified successfully!
-      window.HHHardware.configure({
-        baseUrl: $('rust-url')?.value || 'http://127.0.0.1:8765',
-        token: trimmed
-      });
-      $('rust-token').value = trimmed;
-      hardwareAuthenticated = true;
-      if (splashModal) splashModal.style.display = 'none';
-      Logger.info('AUTH', 'Hardware unlocked with valid pairing token');
-      hist(P, 'hardware', 'Hardware unlocked with pairing token');
-      connectionCheck = null;
-      renderHardware();
-      setBadges();
-      refreshTabs();
-      show('mode');
-    }
-
-    const btnConnect = $('splash-btn-connect');
-    if (btnConnect) {
-      btnConnect.onclick = () => applyToken(splashInput?.value);
-    }
-    const btnSkip = $('splash-btn-skip');
-    if (btnSkip) {
-      btnSkip.onclick = () => {
-        hardwareAuthenticated = false;
-        if (splashModal) splashModal.style.display = 'none';
-        setBadges();
-        refreshTabs();
-        show('mode');
-      };
-    }
-    if (splashInput) {
-      splashInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') applyToken(splashInput.value);
-      });
-    }
+  /* ---------------- Workstation access ---------------- */
+  async function connectWorkstation() {
+    if (running || checking) return;
+    accessChecking = true; setBadges(); refreshTabs();
+    const result = await window.HHHardware.connect();
+    hardwareAuthenticated = result.ok; accessChecking = false;
+    connectionCheck = null; ctrl = null; simDev = null;
+    $('access-status').textContent = result.ok ? 'Connected automatically · no token required' : result.error;
+    $('rust-settings-status').textContent = result.ok ? 'Local session connected automatically.' : result.error;
+    setBadges(); refreshTabs();
+    if (result.ok && !P.runs.length && ['analysis','project'].includes(current)) show('mode');
+    else if (!result.ok && !reachable(current)) show(P.runs.length ? 'analysis' : 'project');
   }
-
+  $('workstation-reconnect').onclick = connectWorkstation;
+  $('rust-reconnect').onclick = connectWorkstation;
+  $('open-project').onclick = () => $('pr-load').click();
   /* ---------------- Global Drag & Drop for Projects ---------------- */
   window.addEventListener('dragover', e => { e.preventDefault(); });
   window.addEventListener('drop', async e => {
@@ -1269,7 +1229,7 @@
   window.addEventListener('beforeunload', e => { if (dirty || running) { e.preventDefault(); e.returnValue = ''; } });
   window.addEventListener('error', e => Logger.error('JS', e.message));
   window.addEventListener('unhandledrejection', e => Logger.error('JS', 'Unhandled: ' + (e.reason && e.reason.message || e.reason)));
-  buildTabs(); syncForm(); setBadges(); initTokenSplash(); Logger.info('APP', 'Workstation started; select real instruments or explicit simulation'); hist(P, 'project', 'new project');
-  show('mode');
-  window.HH.debugState = () => ({ P, ctrl, running, connectionsOk, runner });
+  buildTabs(); syncForm(); setBadges(); connectWorkstation(); Logger.info('APP', 'Workstation started; select real instruments or explicit simulation'); hist(P, 'project', 'new project');
+  show('project');
+  window.HH.debugState = () => ({ P, ctrl, running, connectionsOk, runner, accessChecking, accessMode:canMeasure()?'workstation':'analysis' });
 })();

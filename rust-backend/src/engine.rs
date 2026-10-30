@@ -182,7 +182,7 @@ impl Config {
             "fixed" => {
                 tag(&mode["acq"], &["step", "scan"], "angular acquisition")?;
                 if mode["acq"] == "step" {
-                    whole(&mode["n_angles"], 4, 3600, "Angle count")?;
+                    whole(&mode["n_angles"], 6, 3600, "Angle count")?;
                     positive(&mode["settle_s"], "Settling time", 3600.)?;
                 } else {
                     positive(&mode["rot_hz"], "Rotation frequency", 1.2)?;
@@ -280,7 +280,9 @@ impl Config {
                         86400.,
                     )?;
                     if min_stab < avg {
-                        return Err("Minimum stabilization time must be >= averaging duration".into());
+                        return Err(
+                            "Minimum stabilization time must be >= averaging duration".into()
+                        );
                     }
                     if max_stab <= min_stab {
                         return Err(
@@ -331,14 +333,24 @@ impl Config {
                 ..Default::default()
             },
         ];
-        let is_delta_wiring = ["K6220", "K6221"].contains(&h["source"]["model"].as_str().unwrap_or(""))
+        let is_delta_wiring = ["K6220", "K6221"]
+            .contains(&h["source"]["model"].as_str().unwrap_or(""))
             && ["K2182", "K2182A"].contains(&h["measure"]["volt"].as_str().unwrap_or(""))
             && (self.exc == "delta"
                 || h["measure"]["dc_mode"] == "delta"
-                || h["measure"]["volt_addr"].as_str().unwrap_or("").trim().is_empty()
-                || h["measure"]["volt_addr"].as_str().unwrap_or("").trim().eq_ignore_ascii_case(
-                    h["source"]["address"].as_str().unwrap_or("").trim(),
-                ));
+                || (h["measure"]["dc_mode"] != "independent"
+                    && (h["measure"]["volt_addr"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
+                        || h["measure"]["volt_addr"]
+                            .as_str()
+                            .unwrap_or("")
+                            .trim()
+                            .eq_ignore_ascii_case(
+                                h["source"]["address"].as_str().unwrap_or("").trim(),
+                            ))));
         ds.push(if self.volt {
             Device {
                 role: "voltmeter".into(),
@@ -384,9 +396,9 @@ impl Config {
             let shared_mfli = d.role == "lockin1"
                 && d.model == "MFLI"
                 && h["source"]["model"] == "MFLI"
-                && d.address.trim().eq_ignore_ascii_case(
-                    h["source"]["address"].as_str().unwrap_or("").trim(),
-                );
+                && d.address
+                    .trim()
+                    .eq_ignore_ascii_case(h["source"]["address"].as_str().unwrap_or("").trim());
             if d.connection.as_deref() != Some("delta")
                 && !shared_mfli
                 && !seen.insert(d.address.trim().to_uppercase())
@@ -528,7 +540,7 @@ mod migration_tests {
         }
     }
     fn project() -> Value {
-        json!({"hardware":{"backend":"real","temperature":"off","magnet":{"rotator":"OWISPS10","rotator_addr":"COM3","baud":9600,"counts_per_turn":4000,"velocity_scale":1,"dir_sign":1,"angle_offset_deg":0,"encoder":""},"source":{"model":"K6221","address":"GPIB0::13::INSTR","max_mA":10,"compliance_V":10},"measure":{"volt":"K2182A","volt_addr":"GPIB0::7::INSTR","lockin1":"SR830","lockin1_addr":"GPIB0::8::INSTR"},"tempController":{}},"method":{"kind":"fixed","lock_timeout_s":0.3,"tc_ms":100,"fixed":{"excitation":"dc","acq":"step","I_mA":1,"nplc":1,"n_angles":4,"settle_s":0.01,"reverse":false,"carrier_hz":700,"rot_hz":0.2}},"sample":{},"tempProgram":[{"type":"measure","label":"test"}]})
+        json!({"hardware":{"backend":"real","temperature":"off","magnet":{"rotator":"OWISPS10","rotator_addr":"COM3","baud":9600,"counts_per_turn":4000,"velocity_scale":1,"dir_sign":1,"angle_offset_deg":0,"encoder":""},"source":{"model":"K6221","address":"GPIB0::13::INSTR","max_mA":10,"compliance_V":10},"measure":{"volt":"K2182A","volt_addr":"GPIB0::7::INSTR","lockin1":"SR830","lockin1_addr":"GPIB0::8::INSTR"},"tempController":{}},"method":{"kind":"fixed","lock_timeout_s":0.3,"tc_ms":100,"fixed":{"excitation":"dc","acq":"step","I_mA":1,"nplc":1,"n_angles":6,"settle_s":0.01,"reverse":false,"carrier_hz":700,"rot_hz":0.2}},"sample":{},"tempProgram":[{"type":"measure","label":"test"}]})
     }
     fn exercise(p: Value, b: Arc<Mutex<Bench>>) -> (R<()>, Arc<Job>) {
         let c = Config::parse(p).unwrap();
@@ -666,7 +678,8 @@ mod migration_tests {
             .contains(&("lockin1".into(), "EXTREF:ENABLE 1".into())));
         let mut p = project();
         p["method"] = json!({"kind":"chirp","tc_ms":100,"lock_timeout_s":1,"carrier_hz":700,"levels_mA":[1],"rot_hz":1.2,"cycles":1,"mask_s":0.1,"direction":"cw"});
-        p["hardware"]["source"] = json!({"model":"MFLI","address":"dev1234","max_mA":10,"compliance_V":10});
+        p["hardware"]["source"] =
+            json!({"model":"MFLI","address":"dev1234","max_mA":10,"compliance_V":10});
         p["hardware"]["measure"] = json!({"lockin1":"MFLI","lockin1_addr":"dev1234"});
         let b = bench();
         exercise(p, b.clone()).0.unwrap();
@@ -1329,7 +1342,8 @@ impl<'a> Runtime<'a> {
         if let Err(e) = self.mw("STOP1") {
             errors.push(e);
         }
-        for c in if ["K6221", "MFLI"].contains(&self.c.h["source"]["model"].as_str().unwrap_or("")) {
+        for c in if ["K6221", "MFLI"].contains(&self.c.h["source"]["model"].as_str().unwrap_or(""))
+        {
             vec!["SOUR:SWE:ABOR", "SOUR:WAVE:ABOR", "OUTP OFF"]
         } else {
             vec!["SOUR:SWE:ABOR", "OUTP OFF"]
@@ -1865,16 +1879,8 @@ impl<'a> Runtime<'a> {
             .unwrap_or(avg_s)
             .max(avg_s);
         let tol = num(&s["tol"])?;
-        let mean_tol = s
-            .get("mean_tol")
-            .map(num)
-            .transpose()?
-            .unwrap_or(tol);
-        let esd_tol = s
-            .get("esd_tol")
-            .map(num)
-            .transpose()?
-            .unwrap_or(tol);
+        let mean_tol = s.get("mean_tol").map(num).transpose()?.unwrap_or(tol);
+        let esd_tol = s.get("esd_tol").map(num).transpose()?.unwrap_or(tol);
 
         let end = self.clock.now() + Duration::from_secs_f64(max_stab_s);
         let mut in_band_since: Option<f64> = None;
@@ -1917,23 +1923,19 @@ impl<'a> Runtime<'a> {
 
             window_readings.push((now, t));
             let cutoff = now - avg_s;
-            while window_readings.len() > 1 && window_readings[0].0 < cutoff {
+            while window_readings.len() > 1 && window_readings[1].0 <= cutoff {
                 window_readings.remove(0);
             }
 
-            let covered = window_readings.len() >= 2 && (now - window_readings[0].0) >= (avg_s * 0.8);
-            let mut mean_delta = error;
-            let mut esd = 0.0;
+            let stats = temperature_window(&window_readings, cutoff, avg_s, target);
+            let covered = stats.is_some();
+            let (mean_delta, esd) = stats.unwrap_or((error, 0.));
 
-            if covered {
-                let n = window_readings.len() as f64;
-                let mean_t = window_readings.iter().map(|(_, val)| *val).sum::<f64>() / n;
-                mean_delta = (mean_t - target).abs();
-                let var = window_readings.iter().map(|(_, val)| (*val - mean_t).powi(2)).sum::<f64>() / n;
-                esd = var.sqrt();
-            }
-
-            let is_stable = !ramp && covered && stable_for >= min_stab_s && mean_delta <= mean_tol && esd <= esd_tol;
+            let is_stable = !ramp
+                && covered
+                && stable_for >= min_stab_s
+                && mean_delta <= mean_tol
+                && esd <= esd_tol;
 
             self.job.state.lock().unwrap().temp_status = Some(json!({
                 "targetK": target,
@@ -1954,5 +1956,54 @@ impl<'a> Runtime<'a> {
             }
         }
         Err("Temperature stabilization timed out".into())
+    }
+}
+
+// Integrate absolute error over a complete rolling window. Opposite temperature
+// deviations must never cancel and permit an unstable measurement to start.
+fn temperature_window(
+    readings: &[(f64, f64)],
+    cutoff: f64,
+    window: f64,
+    target: f64,
+) -> Option<(f64, f64)> {
+    if readings.len() < 2 || readings[0].0 > cutoff || window <= 0. {
+        return None;
+    }
+    let mut integral = 0.;
+    for pair in readings.windows(2) {
+        let (ta, a) = pair[0];
+        let (tb, b) = pair[1];
+        if tb <= ta {
+            return None;
+        }
+        let left = cutoff.max(ta);
+        let ea = (a - target).abs();
+        let eb = (b - target).abs();
+        let eleft = ea + (eb - ea) * (left - ta) / (tb - ta);
+        integral += (eleft + eb) * (tb - left) / 2.;
+    }
+    let n = readings.len() as f64;
+    let mean = readings.iter().map(|(_, v)| *v).sum::<f64>() / n;
+    let esd = (readings
+        .iter()
+        .map(|(_, v)| (v - mean).powi(2))
+        .sum::<f64>()
+        / n)
+        .sqrt();
+    Some((integral / window, esd))
+}
+
+#[cfg(test)]
+mod temperature_window_tests {
+    use super::temperature_window;
+    #[test]
+    fn requires_full_window_and_prevents_cancellation() {
+        assert!(temperature_window(&[(1., 300.), (9., 300.)], 0., 10., 300.).is_none());
+        let (error, _) = temperature_window(&[(0., 300.05), (10., 299.95)], 0., 10., 300.).unwrap();
+        assert!((error - 0.05).abs() < 1e-10);
+        let (error, _) =
+            temperature_window(&[(0., 300.04), (2., 300.), (10., 300.)], 0., 10., 300.).unwrap();
+        assert!((error - 0.004).abs() < 1e-10);
     }
 }

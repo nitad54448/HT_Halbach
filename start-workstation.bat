@@ -1,19 +1,17 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Halbach Hall Workstation Service
+title Halbach Physical Properties Workstation
 
 echo ========================================================
-echo       Starting Halbach Hall Workstation Service
+echo       Starting Halbach Physical Properties Workstation
 echo ========================================================
 echo.
 echo Starting local service on http://127.0.0.1:8765 ...
-echo Opening workstation interface in your default browser...
+echo The interface will open when the service is ready.
 echo.
 
-start http://127.0.0.1:8765
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%~dp0rust-backend\start.ps1' -ServeUi"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0rust-backend\start.ps1" -ServeUi -OpenBrowser
 if errorlevel 1 (
     echo.
     echo Service stopped with an error code.

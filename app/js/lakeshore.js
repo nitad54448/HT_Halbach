@@ -93,7 +93,17 @@
     measure: { label: 'Run Hall measurement', defaults: { label: '' } },
     heater_off: { label: 'Heater off', defaults: {} },
   };
-  function makeStep(type, over) { return Object.assign({ type }, STEP_TYPES[type].defaults, over || {}); }
+  function makeStep(type, over) {
+    const step = Object.assign({ type }, STEP_TYPES[type].defaults, over || {});
+    if (type === 'goto' && over) {
+      if (over.window_s !== undefined) {
+        if (over.avg_s === undefined) step.avg_s = over.window_s;
+        if (over.min_stab_s === undefined) step.min_stab_s = over.window_s;
+      }
+      if (over.timeout_s !== undefined && over.max_stab_s === undefined) step.max_stab_s = over.timeout_s;
+    }
+    return step;
+  }
   /** Generate goto+measure pairs for a linear temperature sweep (inclusive). */
   function sweep(T0, T1, dT, base) {
     if (![T0, T1, dT].every(Number.isFinite) || !(dT > 0)) throw new Error('Start, end and step must be finite; step must be > 0');
